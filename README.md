@@ -1,6 +1,6 @@
-# Triton GPU Kernels
+# Triton + CUDA GPU Kernels
 
-Custom Triton kernels for core transformer operations — from elementwise activations to FlashAttention-2 and quantized matmul — with PyTorch reference implementations and benchmarks. Built from scratch to understand GPU kernel programming, memory-aware algorithm design, and tensor core utilization.
+Custom Triton and CUDA kernels for core transformer operations — from elementwise activations to FlashAttention-2 and quantized matmul — with PyTorch reference implementations and benchmarks. Built from scratch to understand GPU kernel programming, memory-aware algorithm design, and tensor core utilization.
 
 ## Kernels
 
