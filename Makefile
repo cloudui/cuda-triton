@@ -2,7 +2,7 @@
 
 # Install CUDA dev headers (only need to run once)
 setup-cuda:
-	conda install -c nvidia cuda-cudart-dev=12.4 cuda-nvcc=12.4 cuda-cccl=12.4 --no-deps -y
+	conda install -c nvidia/label/cuda-13.0.0 cuda-cudart-dev cuda-nvcc cuda-cccl --no-deps -y
 	@echo "Done. Make sure CUDA_HOME is set:"
 	@echo "  export CUDA_HOME=$$CONDA_PREFIX"
 
