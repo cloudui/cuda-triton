@@ -12,7 +12,8 @@ sys.path.insert(0, ".")
 
 try:
     import cuda_kernels
-except ImportError:
+except ImportError as e:
+    print(e)
     cuda_kernels = None
 from kernels.attention import attention_native, attention_pytorch, attention_triton
 from kernels.flash_attention import (
@@ -486,6 +487,40 @@ class TestInt4Matmul:
 
 
 # ── CUDA kernels ─────────────────────────────────────────────────
+
+
+@pytest.mark.skipif(
+    cuda_kernels is None, reason="CUDA extension not built — run `make build-cuda`"
+)
+class TestWMMAMatmul:
+    """WMMA 16×16 tiled matmul — fp16 in, fp32 out."""
+
+    SIZES = [(16, 16, 16), (16, 32, 16), (32, 64, 32), (64, 128, 64)]
+
+    @pytest.mark.parametrize("M,K,N", SIZES)
+    def test_matches_pytorch(self, M, K, N):
+        torch.manual_seed(42)
+        A = torch.randn(M, K, device="cuda", dtype=torch.float16)
+        B = torch.randn(K, N, device="cuda", dtype=torch.float16)
+        ref = A.float() @ B.float()
+        out = cuda_kernels.wmma_matmul(A, B)
+        torch.testing.assert_close(out, ref, atol=1e-1, rtol=1e-2)
+
+    @pytest.mark.parametrize("M,K,N", SIZES)
+    def test_output_shape(self, M, K, N):
+        torch.manual_seed(42)
+        A = torch.randn(M, K, device="cuda", dtype=torch.float16)
+        B = torch.randn(K, N, device="cuda", dtype=torch.float16)
+        out = cuda_kernels.wmma_matmul(A, B)
+        assert out.shape == (M, N)
+
+    @pytest.mark.parametrize("M,K,N", SIZES)
+    def test_output_dtype(self, M, K, N):
+        torch.manual_seed(42)
+        A = torch.randn(M, K, device="cuda", dtype=torch.float16)
+        B = torch.randn(K, N, device="cuda", dtype=torch.float16)
+        out = cuda_kernels.wmma_matmul(A, B)
+        assert out.dtype == torch.float32
 
 
 @pytest.mark.skipif(
