@@ -52,3 +52,47 @@ bench-fac:
 # Clean FlashAttention build artifacts
 clean-fac:
 	rm -rf cuda/flash_attn/build cuda/flash_attn/*.so cuda/flash_attn/*.egg-info
+
+# Profile FlashAttention CUDA with Nsight Compute.
+# Override the workload via PROF_ARGS, e.g. `make prof-fac PROF_ARGS="--seq 4096 --causal"`.
+# Output is teed to profiles/prof_<set>_<seq>.txt for diffing across versions.
+# Note: LD_PRELOAD is needed because conda's libstdc++ is newer than the system's,
+# and the extension's .so requires the conda version's CXXABI.
+seq ?= 2048
+PROF_ARGS ?= --seq $(seq)
+PROF_SEQ  := $(shell echo "$(PROF_ARGS)" | grep -oE -- "--seq [0-9]+" | awk '{print $$2}')
+PROF_PRELOAD := LD_PRELOAD=$$CONDA_PREFIX/lib/libstdc++.so.6
+
+# Quick metrics — Speed of Light, Launch Stats, Occupancy. Fast.
+prof-fac:
+	@mkdir -p profiles
+	$(PROF_PRELOAD) ncu --set basic --target-processes all \
+		--kernel-name flash_fwd_kernel \
+		--launch-skip 5 --launch-count 1 \
+		python cuda/flash_attn/profile_runner.py $(PROF_ARGS) \
+		2>&1 | tee profiles/prof_basic_seq$(PROF_SEQ).txt
+
+# Full metrics — adds Warp State Stall Reasons, Memory Workload Analysis, Source/SASS counters.
+# Slower (~10x) but tells you WHY warps are stalling and whether you have bank conflicts.
+prof-fac-full:
+	@mkdir -p profiles
+	$(PROF_PRELOAD) ncu --set full --target-processes all \
+		--kernel-name flash_fwd_kernel \
+		--launch-skip 5 --launch-count 1 \
+		python cuda/flash_attn/profile_runner.py $(PROF_ARGS) \
+		2>&1 | tee profiles/prof_full_seq$(PROF_SEQ).txt
+
+# GUI-loadable .ncu-rep file for inspection in nsight-compute UI (`ncu-ui profiles/prof_<seq>.ncu-rep`).
+prof-fac-rep:
+	@mkdir -p profiles
+	$(PROF_PRELOAD) ncu --set full -o profiles/prof_seq$(PROF_SEQ) --force-overwrite \
+		--target-processes all \
+		--kernel-name flash_fwd_kernel \
+		--launch-skip 5 --launch-count 1 \
+		python cuda/flash_attn/profile_runner.py $(PROF_ARGS)
+
+# Nsight Systems timeline (works when ncu is blocked by host monitoring).
+prof-nsys-fac:
+	@mkdir -p profiles
+	$(PROF_PRELOAD) nsys profile --stats=true -o profiles/nsys_seq$(PROF_SEQ) --force-overwrite=true \
+		python cuda/flash_attn/profile_runner.py $(PROF_ARGS)

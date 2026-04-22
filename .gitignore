@@ -8,3 +8,11 @@ build/
 .claude/
 *.so
 *.profraw
+ncu-clear.sh
+
+# Nsight profiling artifacts
+profiles/
+*.ncu-rep
+*.nsys-rep
+*.qdrep
+*.qdstrm
