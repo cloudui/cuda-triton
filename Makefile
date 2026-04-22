@@ -35,3 +35,20 @@ bench-cuda-softmax:
 # Clean CUDA build artifacts
 clean-cuda:
 	rm -rf cuda/build cuda/dist cuda/*.egg-info cuda/*.so cuda_kernels*.so
+
+# Build the WMMA FlashAttention CUDA extension
+build-fa:
+	cd cuda/flash_attn && python setup.py build_ext --inplace
+	@echo "Built flash_attn_cuda extension"
+
+# Run FlashAttention CUDA correctness tests
+test-fa:
+	LD_PRELOAD=$$CONDA_PREFIX/lib/libstdc++.so.6 python -m pytest tests/test_kernels.py -v -k "CUDAFlashAttention"
+
+# Benchmark FlashAttention CUDA vs PyTorch SDPA
+bench-fa:
+	LD_PRELOAD=$$CONDA_PREFIX/lib/libstdc++.so.6 python benchmarks/bench_cuda_flash_attention.py
+
+# Clean FlashAttention build artifacts
+clean-fa:
+	rm -rf cuda/flash_attn/build cuda/flash_attn/*.so cuda/flash_attn/*.egg-info
