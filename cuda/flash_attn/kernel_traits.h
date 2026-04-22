@@ -33,17 +33,26 @@ struct Flash_fwd_kernel_traits {
     static constexpr int kWmmaTilesN = kBlockN / WMMA_N;  // e.g. 64/16 = 4
     static constexpr int kWmmaTilesK = kHeadDim / WMMA_K; // e.g. 64/16 = 4
 
-    // Shared memory sizes (in bytes)
-    // Q tile:    BLOCK_M × head_dim × sizeof(half)
-    // K/V tile:  BLOCK_N × head_dim × sizeof(half) — reused (K then V, not alive together)
-    // scores/O:  BLOCK_M × max(BLOCK_N, head_dim) × sizeof(float) — same buffer, two roles
-    //              scores fp32 used for Q@K^T output, then overwritten by P@V output (O temp)
-    // P tile:    BLOCK_M × BLOCK_N × sizeof(half) — softmax output as fp16 for second matmul
-    static constexpr int kSmemQ      = kBlockM * kHeadDim * sizeof(half);
-    static constexpr int kSmemKV     = kBlockN * kHeadDim * sizeof(half);
-    static constexpr int kSmemScores = kBlockM * kBlockN * sizeof(float);
-    static constexpr int kSmemO      = kBlockM * kHeadDim * sizeof(float);
-    static constexpr int kSmemP      = kBlockM * kBlockN * sizeof(half);
+    // Padded strides (must match flash_fwd_kernel.h) to break smem bank-conflict
+    // alignment. fp16 buffers padded by 8 halves (16 bytes); fp32 buffers padded
+    // by 4 floats (16 bytes). Both maintain the 16-byte alignment required by
+    // ldmatrix / store_matrix_sync.
+    static constexpr int kQStride     = kHeadDim + 8;   // halves
+    static constexpr int kKVStride    = kHeadDim + 8;   // halves
+    static constexpr int kScoreStride = kBlockN  + 4;   // floats
+    static constexpr int kPStride     = kBlockN  + 8;   // halves
+    static constexpr int kOStride     = kHeadDim + 4;   // floats
+
+    // Shared memory sizes (in bytes), accounting for padded strides.
+    // Q tile:    BLOCK_M × Q_STRIDE × sizeof(half)
+    // K/V tile:  BLOCK_N × KV_STRIDE × sizeof(half) — reused (K then V, not alive together)
+    // scores/O:  BLOCK_M × max(SCORE_STRIDE, O_STRIDE) × sizeof(float) — same buffer, two roles
+    // P tile:    BLOCK_M × P_STRIDE × sizeof(half)
+    static constexpr int kSmemQ      = kBlockM * kQStride     * sizeof(half);
+    static constexpr int kSmemKV     = kBlockN * kKVStride    * sizeof(half);
+    static constexpr int kSmemScores = kBlockM * kScoreStride * sizeof(float);
+    static constexpr int kSmemO      = kBlockM * kOStride     * sizeof(float);
+    static constexpr int kSmemP      = kBlockM * kPStride     * sizeof(half);
 
     // scores and O alias the same buffer, so we need max of the two
     static constexpr int kSmemScoresO = kSmemScores > kSmemO ? kSmemScores : kSmemO;
@@ -60,9 +69,9 @@ struct Flash_fwd_kernel_traits {
     // Plus WMMA fragments, softmax state, loop vars → ~180-200 total
     // A100 max: 65536 / 128 threads = 512 regs/thread — plenty of headroom
 
-    // Smem totals (for reference):
-    //   hdim64:   16K + 8K  + 32K + 16K =  72 KB
-    //   hdim128:  32K + 16K + 64K + 16K = 128 KB  (needs cudaFuncSetAttribute, A100 max = 164 KB)
+    // Smem totals with padding (for reference):
+    //   hdim64:   18K + 9K  + 34K + 18K ≈  79 KB
+    //   hdim128:  35K + 17K + 66K + 18K ≈ 136 KB  (still fits A100's 164 KB max)
 };
 
 // Concrete configs

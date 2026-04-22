@@ -111,7 +111,7 @@ template <int N> __device__ __forceinline__ void cp_async_wait() {
 // TODO: Start with this, replace with cp.async in Phase 2.
 // Each thread cooperatively loads part of a (rows × cols) tile.
 //
-template <int rows, int cols, int kNThreads>
+template <int rows, int cols, int smem_stride, int kNThreads>
 __device__ void load_tile_sync(half *smem, const half *gmem, int row_stride,
                                int valid_rows, int tid) {
   constexpr int n = rows * cols;
@@ -120,6 +120,7 @@ __device__ void load_tile_sync(half *smem, const half *gmem, int row_stride,
     int index = 8 * (tid + i * kNThreads);
     int row = index / cols;
     int col = index % cols;
+    int smem_idx = row * smem_stride + col;
     if (row < valid_rows) {
       // grab float 4 chunk from gmem
       float4 chunk =
@@ -128,13 +129,13 @@ __device__ void load_tile_sync(half *smem, const half *gmem, int row_stride,
 #pragma unroll
       for (int j = 0; j < 4; j++) {
         half2 val = c_ptr[j];
-        smem[index + 2 * j] = val.x;
-        smem[index + 2 * j + 1] = val.y;
+        smem[smem_idx + 2 * j] = val.x;
+        smem[smem_idx + 2 * j + 1] = val.y;
       }
     } else {
 #pragma unroll
       for (int j = 0; j < 8; j++) {
-        smem[index + j] = __float2half(0.0f);
+        smem[smem_idx + j] = __float2half(0.0f);
       }
     }
   }
