@@ -14,6 +14,7 @@
  */
 
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
 
 #include "flash.h"
 #include "flash_fwd_launch_template.h"

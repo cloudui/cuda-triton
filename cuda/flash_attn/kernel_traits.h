@@ -34,24 +34,35 @@ struct Flash_fwd_kernel_traits {
     static constexpr int kWmmaTilesK = kHeadDim / WMMA_K; // e.g. 64/16 = 4
 
     // Shared memory sizes (in bytes)
-    // Q tile: BLOCK_M × head_dim × sizeof(half)
-    // K tile: BLOCK_N × head_dim × sizeof(half) — ×2 for double buffer
-    // V tile: BLOCK_N × head_dim × sizeof(half) — ×2 for double buffer
-    static constexpr int kSmemQ = kBlockM * kHeadDim * sizeof(half);
-    static constexpr int kSmemK = kBlockN * kHeadDim * sizeof(half);
-    static constexpr int kSmemV = kBlockN * kHeadDim * sizeof(half);
+    // Q tile:    BLOCK_M × head_dim × sizeof(half)
+    // K/V tile:  BLOCK_N × head_dim × sizeof(half) — reused (K then V, not alive together)
+    // scores/O:  BLOCK_M × max(BLOCK_N, head_dim) × sizeof(float) — same buffer, two roles
+    //              scores fp32 used for Q@K^T output, then overwritten by P@V output (O temp)
+    // P tile:    BLOCK_M × BLOCK_N × sizeof(half) — softmax output as fp16 for second matmul
+    static constexpr int kSmemQ      = kBlockM * kHeadDim * sizeof(half);
+    static constexpr int kSmemKV     = kBlockN * kHeadDim * sizeof(half);
+    static constexpr int kSmemScores = kBlockM * kBlockN * sizeof(float);
+    static constexpr int kSmemO      = kBlockM * kHeadDim * sizeof(float);
+    static constexpr int kSmemP      = kBlockM * kBlockN * sizeof(half);
+
+    // scores and O alias the same buffer, so we need max of the two
+    static constexpr int kSmemScoresO = kSmemScores > kSmemO ? kSmemScores : kSmemO;
 
     // Without double buffering (Phase 1):
-    static constexpr int kSmemSize = kSmemQ + kSmemK + kSmemV;
+    static constexpr int kSmemSize = kSmemQ + kSmemKV + kSmemScoresO + kSmemP;
 
     // With double buffering (Phase 2):
-    // static constexpr int kSmemSize = kSmemQ + 2 * kSmemK + 2 * kSmemV;
+    // static constexpr int kSmemSize = kSmemQ + 2 * kSmemKV + kSmemScoresO + kSmemP;
 
     // Register pressure check:
     // O accumulator: BLOCK_M × head_dim / kNThreads floats per thread
     // For hdim128, BLOCK_M=128, 128 threads: 128 × 128 / 128 = 128 fp32 regs
     // Plus WMMA fragments, softmax state, loop vars → ~180-200 total
     // A100 max: 65536 / 128 threads = 512 regs/thread — plenty of headroom
+
+    // Smem totals (for reference):
+    //   hdim64:   16K + 8K  + 32K + 16K =  72 KB
+    //   hdim128:  32K + 16K + 64K + 16K = 128 KB  (needs cudaFuncSetAttribute, A100 max = 164 KB)
 };
 
 // Concrete configs

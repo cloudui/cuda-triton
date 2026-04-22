@@ -86,6 +86,15 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   constexpr int BLOCK_N = Traits::kBlockN;
   constexpr int HEAD_DIM = Traits::kHeadDim;
   constexpr int NTHREADS = Traits::kNThreads;
+  constexpr int NWARPS = NTHREADS / 32;
+
+  // v1 assumption: each thread owns exactly 1 row of Q/scores/P/O.
+  // Many indexing simplifications below depend on this — break it loudly if violated.
+  static_assert(BLOCK_M == NTHREADS, "v1: 1 thread per row");
+
+  // scores and O alias the same smem region; reserve the larger of the two.
+  constexpr int SCORES_O_FLOATS =
+      (BLOCK_M * BLOCK_N > BLOCK_M * HEAD_DIM) ? BLOCK_M * BLOCK_N : BLOCK_M * HEAD_DIM;
 
   // Thread / block indices
   const int m_block = blockIdx.x; // which chunk of Q rows
@@ -93,6 +102,7 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   const int batch_idx = bh_idx / params.num_heads;
   const int head_idx = bh_idx % params.num_heads;
   const int tid = threadIdx.x;
+  const int warp_id = tid / 32;
 
   // For GQA/MQA: kv_head = head_idx / (num_heads / num_heads_k)
   // const int kv_head_idx = head_idx / (params.num_heads / params.num_heads_k);
@@ -105,6 +115,8 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   half *smem_q = reinterpret_cast<half *>(smem_raw);
   half *smem_kv = smem_q + BLOCK_M * HEAD_DIM;
   float *smem_scores = reinterpret_cast<float *>(smem_kv + HEAD_DIM * BLOCK_N);
+  float *smem_o = smem_scores;
+  half *smem_p = reinterpret_cast<half *>(smem_scores + SCORES_O_FLOATS);
   //
   // Partition shared memory:
   //   half *smem_q      = (half *)smem_raw;                         //
@@ -119,7 +131,7 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   //   HEAD_DIM);
   //   // BLOCK_M × BLOCK_N
 
-  // float scale = rsqrtf(HEAD_DIM);
+  float scale = rsqrtf(HEAD_DIM);
 
   const half *q_ptr = reinterpret_cast<const half *>(params.q_ptr) +
                       BLOCK_M * m_block * params.q_row_stride +
@@ -131,9 +143,10 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   const half *v_ptr = reinterpret_cast<const half *>(params.v_ptr) +
                       batch_idx * params.v_batch_stride +
                       head_idx * params.v_head_stride;
-  const half *o_ptr = reinterpret_cast<const half *>(params.o_ptr) +
-                      batch_idx * params.o_batch_stride +
-                      head_idx * params.o_head_stride;
+  half *o_ptr = reinterpret_cast<half *>(params.o_ptr) +
+                BLOCK_M * m_block * params.o_row_stride +
+                batch_idx * params.o_batch_stride +
+                head_idx * params.o_head_stride;
 
   // ========================================================================
   // Step 3: Load Q tile into shared memory (one-time, reused across KV tiles)
@@ -160,6 +173,13 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   float o_acc[rows_per_thread][HEAD_DIM];
   float m_state[rows_per_thread];
   float l_state[rows_per_thread];
+
+  m_state[0] = -INFINITY;
+  l_state[0] = 0.0f;
+  for (int d = 0; d < HEAD_DIM; d++) {
+    o_acc[0][d] = 0.0f;
+  }
+
   //   const int rows_per_thread = BLOCK_M / NTHREADS;  // e.g., 128/128 = 1
   //   float o_acc[rows_per_thread][HEAD_DIM];           // zero-initialized
   //   float m_state[rows_per_thread];                   // = -INFINITY
@@ -173,140 +193,96 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
                            : params.seqlen_k;
   //
   for (int kv_start = 0; kv_start < kv_end; kv_start += BLOCK_N) {
-    int kv_rows_valid = min(BLOCK_M, params.seqlen_k - kv_start);
+    int kv_rows_valid = min(BLOCK_N, params.seqlen_k - kv_start);
     load_tile_sync<BLOCK_N, HEAD_DIM, NTHREADS>(
-        smem_kv, k_ptr, params.k_row_stride, kv_rows_valid, tid);
+        smem_kv, k_ptr + kv_start * params.k_row_stride, params.k_row_stride,
+        kv_rows_valid, tid);
 
     // Q @ K^T using WMMA
     wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> q_frag;
     wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> k_frag;
     wmma::fragment<wmma::accumulator, 16, 16, 16, float> s_frag;
 
-    for (int wi = 0; wi < BLOCK_M; wi += 16) {
-      wmma::fill_fragment(s_frag, 0.0f);
-      for (int wj = 0; wj < HEAD_DIM; wj += 16) {
-        wmma::load_matrix_sync(q_frag, &smem_q[wi * HEAD_DIM + wk], HEAD_DIM);
-        wmma::load_matrix_sync(k_frag, &smem_k[wi * HEAD_DIM + wk], HEAD_DIM);
-        wmma::mma_sync(s_frag, q_frag, k_frag, s_frag);
+    // Q @ K.T
+    if (warp_id == 0) {
+      for (int wi = 0; wi < BLOCK_M; wi += 16) {
+        for (int wj = 0; wj < BLOCK_N; wj += 16) {
+          wmma::fill_fragment(s_frag, 0.0f);
+          for (int wk = 0; wk < HEAD_DIM; wk += 16) {
+            wmma::load_matrix_sync(q_frag, &smem_q[wi * HEAD_DIM + wk],
+                                   HEAD_DIM);
+            wmma::load_matrix_sync(k_frag, &smem_kv[wj * HEAD_DIM + wk],
+                                   HEAD_DIM);
+            wmma::mma_sync(s_frag, q_frag, k_frag, s_frag);
+          }
+          wmma::store_matrix_sync(&smem_scores[wi * BLOCK_N + wj], s_frag,
+                                  BLOCK_N, wmma::mem_row_major);
+        }
       }
-      wmma::store_matrix_sync(&smem_scores[wi * BLOCK_N + wj], s_frag, BLOCK_N,
-                              wmma::mem_row_major);
+    }
+
+    __syncthreads();
+
+    int start = tid * BLOCK_N;
+    int end = start + BLOCK_N;
+    // compute max
+    float max_old = m_state[0];
+    float max_new = max_old;
+    for (int i = start; i < end; i++) {
+      smem_scores[i] *= scale;
+      max_new = fmaxf(max_new, smem_scores[i]);
+    }
+    m_state[0] = max_new;
+
+    float correction = expf(max_old - max_new);
+    float l_sum = 0.f;
+    for (int i = start; i < end; i++) {
+      float score = __expf(smem_scores[i] - max_new);
+      l_sum += score;
+      smem_p[i] = __float2half(score);
+    }
+    l_state[0] = l_state[0] * correction + l_sum;
+
+    __syncthreads();
+
+    load_tile_sync<BLOCK_N, HEAD_DIM, NTHREADS>(
+        smem_kv, v_ptr + kv_start * params.v_row_stride, params.v_row_stride,
+        kv_rows_valid, tid);
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> p_frag;
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> v_frag;
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> o_frag;
+
+    if (warp_id == 0) {
+      for (int wi = 0; wi < BLOCK_M; wi += 16) {
+        for (int wj = 0; wj < HEAD_DIM; wj += 16) {
+          wmma::fill_fragment(o_frag, 0.0f);
+          for (int wk = 0; wk < BLOCK_N; wk += 16) {
+            wmma::load_matrix_sync(p_frag, &smem_p[wi * BLOCK_N + wk], BLOCK_N);
+            wmma::load_matrix_sync(v_frag, &smem_kv[wj + HEAD_DIM * wk],
+                                   HEAD_DIM);
+            wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
+          }
+          wmma::store_matrix_sync(&smem_o[wi * HEAD_DIM + wj], o_frag, HEAD_DIM,
+                                  wmma::mem_row_major);
+        }
+      }
+    }
+
+    // Required: warp 0 wrote smem_o, all 128 threads now read it.
+    // Also ensures warp 0's reads of smem_kv (V) finish before next iter's K load
+    // overwrites smem_kv.
+    __syncthreads();
+    for (int i = 0; i < HEAD_DIM; i++) {
+      o_acc[0][i] = o_acc[0][i] * correction + smem_o[tid * HEAD_DIM + i];
     }
   }
-  //     // --- 5b. Compute S = Q @ K^T using WMMA ---
-  //     // S is BLOCK_M × BLOCK_N, stored in fp32 accumulators.
-  //     //
 
-  //     // for (int wi = 0; wi < BLOCK_M; wi += 16) {
-  //     //     for (int wj = 0; wj < BLOCK_N; wj += 16) {
-  //     //         wmma::fill_fragment(s_frag, 0.0f);
-  //     //         for (int wk = 0; wk < HEAD_DIM; wk += 16) {
-  //     //             wmma::load_matrix_sync(q_frag, &smem_q[wi * HEAD_DIM +
-  //     wk], HEAD_DIM);
-  //     //             wmma::load_matrix_sync(k_frag, &smem_k[wj * HEAD_DIM +
-  //     wk], HEAD_DIM);
-  //     //             // K is row-major in smem but we want K^T, so load as
-  //     col_major
-  //     //             wmma::mma_sync(s_frag, q_frag, k_frag, s_frag);
-  //     //         }
-  //     //         // Apply softmax scale (log2e-adjusted)
-  //     //         // for (int i = 0; i < s_frag.num_elements; i++)
-  //     //         //     s_frag.x[i] *= params.scale_softmax_log2;
-  //     //
-  //     //         // Store S tile to shared memory for softmax
-  //     //         // wmma::store_matrix_sync(&smem_scores[wi * BLOCK_N + wj],
-  //     s_frag, BLOCK_N, wmma::mem_row_major);
-  //     //     }
-  //     // }
-  //     // __syncthreads();
-  //
-  //     // --- 5c. Causal masking ---
-  //     // if constexpr (Is_causal) {
-  //     //     // Each thread handles some rows of smem_scores
-  //     //     int q_row_start = m_block * BLOCK_M;
-  //     //     for (int idx = tid; idx < BLOCK_M * BLOCK_N; idx += NTHREADS) {
-  //     //         int qi = idx / BLOCK_N;
-  //     //         int kj = idx % BLOCK_N;
-  //     //         if ((q_row_start + qi) < (kv_start + kj)) {
-  //     //             smem_scores[qi * BLOCK_N + kj] = -INFINITY;
-  //     //         }
-  //     //     }
-  //     //     __syncthreads();
-  //     // }
-  //
-  //     // --- 5d. Online softmax on scores in shared memory ---
-  //     // Each thread processes its assigned rows:
-  //     // for (int r = 0; r < rows_per_thread; r++) {
-  //     //     int row = tid * rows_per_thread + r;  // or however rows map to
-  //     threads
-  //     //     float *row_scores = &smem_scores[row * BLOCK_N];
-  //     //     float m_old = m_state[r];
-  //     //
-  //     //     softmax_state[r].update(row_scores, kv_rows_valid,
-  //     params.scale_softmax_log2);
-  //     //
-  //     //     // Rescale O accumulator
-  //     //     float correction = softmax_state[r].get_correction(m_old);
-  //     //     for (int d = 0; d < HEAD_DIM; d++)
-  //     //         o_acc[r][d] *= correction;
-  //     // }
-  //     // __syncthreads();
-  //
-  //     // --- 5e. Convert P to fp16 in shared memory ---
-  //     // P is currently fp32 in smem_scores. Convert to fp16 for WMMA input.
-  //     // Reinterpret smem_scores as half* or use a separate buffer.
-  //     // half *smem_p = (half *)smem_scores;  // careful: fp32 is 4 bytes,
-  //     half is 2
-  //     // for (int idx = tid; idx < BLOCK_M * BLOCK_N; idx += NTHREADS) {
-  //     //     smem_p[idx] = __float2half(smem_scores_copy[idx]);
-  //     // }
-  //     // __syncthreads();
-  //
-  //     // --- 5f. Load V tile into shared memory ---
-  //     // load_tile_sync<BLOCK_N, HEAD_DIM, NTHREADS>(
-  //     //     smem_v, v_ptr + kv_start * params.v_row_stride,
-  //     //     params.v_row_stride, kv_rows_valid, tid);
-  //
-  //     // --- 5g. Compute O += P @ V using WMMA ---
-  //     // O is BLOCK_M × HEAD_DIM
-  //     // P is BLOCK_M × BLOCK_N (fp16 in smem)
-  //     // V is BLOCK_N × HEAD_DIM (fp16 in smem)
-  //     //
-  //     // This accumulates into o_acc (or into WMMA fragments that map to
-  //     o_acc).
-  //     // Phase 1 approach: store P@V result to smem, then each thread adds to
-  //     o_acc.
-  //     //
-  //     // wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major>
-  //     p_frag;
-  //     // wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major>
-  //     v_frag;
-  //     // wmma::fragment<wmma::accumulator, 16, 16, 16, float> o_frag;
-  //     //
-  //     // for (int wi = 0; wi < BLOCK_M; wi += 16) {
-  //     //     for (int wj = 0; wj < HEAD_DIM; wj += 16) {
-  //     //         wmma::fill_fragment(o_frag, 0.0f);
-  //     //         for (int wk = 0; wk < BLOCK_N; wk += 16) {
-  //     //             wmma::load_matrix_sync(p_frag, &smem_p[wi * BLOCK_N +
-  //     wk], BLOCK_N);
-  //     //             wmma::load_matrix_sync(v_frag, &smem_v[wk * HEAD_DIM +
-  //     wj], HEAD_DIM);
-  //     //             wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
-  //     //         }
-  //     //         // Store o_frag to smem, then add to o_acc
-  //     //         // wmma::store_matrix_sync(&smem_o_tmp[wi * HEAD_DIM + wj],
-  //     o_frag, HEAD_DIM, wmma::mem_row_major);
-  //     //     }
-  //     // }
-  //     // __syncthreads();
-  //     //
-  //     // // Add this tile's contribution to the running O
-  //     // for (int r = 0; r < rows_per_thread; r++) {
-  //     //     int row = tid * rows_per_thread + r;
-  //     //     for (int d = 0; d < HEAD_DIM; d++)
-  //     //         o_acc[r][d] += smem_o_tmp[row * HEAD_DIM + d];
-  //     // }
-  // }
+  // __syncthreads();
+  half *o_row = o_ptr + params.o_row_stride * tid;
+  for (int i = 0; i < HEAD_DIM; i++) {
+    o_row[i] = __float2half(o_acc[0][i] / l_state[0]);
+  }
 
   // ========================================================================
   // Step 6: Final normalization and writeback
