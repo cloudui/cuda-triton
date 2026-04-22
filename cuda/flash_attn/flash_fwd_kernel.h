@@ -89,12 +89,14 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   constexpr int NWARPS = NTHREADS / 32;
 
   // v1 assumption: each thread owns exactly 1 row of Q/scores/P/O.
-  // Many indexing simplifications below depend on this — break it loudly if violated.
+  // Many indexing simplifications below depend on this — break it loudly if
+  // violated.
   static_assert(BLOCK_M == NTHREADS, "v1: 1 thread per row");
 
   // scores and O alias the same smem region; reserve the larger of the two.
-  constexpr int SCORES_O_FLOATS =
-      (BLOCK_M * BLOCK_N > BLOCK_M * HEAD_DIM) ? BLOCK_M * BLOCK_N : BLOCK_M * HEAD_DIM;
+  constexpr int SCORES_O_FLOATS = (BLOCK_M * BLOCK_N > BLOCK_M * HEAD_DIM)
+                                      ? BLOCK_M * BLOCK_N
+                                      : BLOCK_M * HEAD_DIM;
 
   // Thread / block indices
   const int m_block = blockIdx.x; // which chunk of Q rows
@@ -270,8 +272,8 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
     }
 
     // Required: warp 0 wrote smem_o, all 128 threads now read it.
-    // Also ensures warp 0's reads of smem_kv (V) finish before next iter's K load
-    // overwrites smem_kv.
+    // Also ensures warp 0's reads of smem_kv (V) finish before next iter's K
+    // load overwrites smem_kv.
     __syncthreads();
     for (int i = 0; i < HEAD_DIM; i++) {
       o_acc[0][i] = o_acc[0][i] * correction + smem_o[tid * HEAD_DIM + i];
@@ -283,30 +285,4 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   for (int i = 0; i < HEAD_DIM; i++) {
     o_row[i] = __float2half(o_acc[0][i] / l_state[0]);
   }
-
-  // ========================================================================
-  // Step 6: Final normalization and writeback
-  // ========================================================================
-  // for (int r = 0; r < rows_per_thread; r++) {
-  //     int row = tid * rows_per_thread + r;
-  //     float inv_l = 1.0f / l_state[r];
-  //     for (int d = 0; d < HEAD_DIM; d++) {
-  //         o_ptr[row * params.o_row_stride + d] = __float2half(o_acc[r][d] *
-  //         inv_l);
-  //     }
-  // }
-  //
-  // // Optionally store log-sum-exp for backward pass:
-  // // softmax_lse[batch][head][q_row] = m + log2f(l) / log2(e)
-  // // if (params.softmax_lse_ptr != nullptr) {
-  // //     for (int r = 0; r < rows_per_thread; r++) {
-  // //         int row = m_block * BLOCK_M + tid * rows_per_thread + r;
-  // //         if (row < params.seqlen_q) {
-  // //             int lse_idx = batch_idx * params.num_heads * params.seqlen_q
-  // //                         + head_idx * params.seqlen_q + row;
-  // //             params.softmax_lse_ptr[lse_idx] = m_state[r] / M_LOG2E +
-  // logf(l_state[r]);
-  // //         }
-  // //     }
-  // // }
 }
