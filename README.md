@@ -1,6 +1,6 @@
 # Triton + CUDA GPU Kernels
 
-Custom Triton and CUDA kernels for core transformer operations — from elementwise activations to FlashAttention-2 and quantized matmul — with PyTorch reference implementations and benchmarks. Built from scratch to understand GPU kernel programming, memory-aware algorithm design, and tensor core utilization.
+Triton and CUDA kernel implementations for core transformer operations — elementwise activations, RMSNorm, softmax, FlashAttention-2, tiled fp16 / int8 / int4 matmul — with PyTorch reference implementations, correctness tests, and A100 benchmarks.
 
 ## Kernels
 
@@ -184,8 +184,14 @@ tests/
 ## Usage
 
 ```bash
-# Install
-pip install torch triton
+# Install (CUDA 13.0 — most recent setup)
+conda create -n torch_cuda13 python=3.12 -y
+conda activate torch_cuda13
+conda install -c nvidia/label/cuda-13.0.0 cuda-toolkit cuda-nvcc -y
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+pip install -r requirements.txt   # triton, ninja, pytest, numpy
+
+# For CUDA 12.x: drop the --index-url, use the default PyTorch wheels.
 
 # Run tests
 python -m pytest tests/test_kernels.py -v
@@ -200,24 +206,30 @@ python benchmarks/bench_flash_attention_full.py
 python benchmarks/bench_fused.py
 python benchmarks/bench_quantized_matmul.py
 
-# Build and benchmark CUDA kernels
+# Build and benchmark CUDA kernels (general)
 make build-cuda
-python benchmarks/bench_cuda_softmax.py
+make bench-cuda-softmax
+
+# Build, test, and benchmark the WMMA FlashAttention CUDA kernel
+make build-fac
+make test-fac
+make bench-fac
 ```
 
-## Learning Path
+## Kernel progression
 
-This repo represents a progression through Triton kernel development:
+The kernels are organized by complexity, each building on patterns from the previous:
 
-1. **SwiGLU** — Elementwise ops. Learn the Triton programming model: programs, blocks, masks.
-2. **RMSNorm** — Row-wise reduction. Learn per-row reductions with `tl.sum`.
-3. **Fused RMSNorm+SwiGLU** — Kernel fusion. Learn why combining ops saves HBM bandwidth.
-4. **Softmax** — Numerically stable reduction. Learn the max-subtract trick for fp16.
-5. **Naive Attention** — 2D block loads. Learn broadcasting and multi-dimensional indexing.
-6. **FlashAttention-2 (single-head)** — Tiled attention with online softmax. Learn looping within kernels and incremental algorithms.
-7. **FlashAttention-2 (full)** — Batched multi-head with causal masking. Learn 2D grids, stride-based pointer arithmetic, tensor core utilization via `tl.dot`, and causal early exit.
-8. **Tiled fp16 Matmul** — Bare tiled matmul as a cuBLAS comparison baseline. Learn the 2D grid + K-loop accumulation pattern.
-9. **Quantized Matmul** — int8/int4 dequantize-on-the-fly. Learn bit packing/unpacking, group quantization, and the tradeoffs between memory savings and compute overhead.
+1. **SwiGLU** — elementwise op (Triton programming model basics: programs, blocks, masks)
+2. **RMSNorm** — row-wise reduction with `tl.sum`
+3. **Fused RMSNorm+SwiGLU** — kernel fusion to halve HBM bandwidth
+4. **Softmax** — numerically stable reduction (max-subtract trick for fp16)
+5. **Naive Attention** — 2D block loads, broadcasting, multi-dim indexing
+6. **FlashAttention-2 (single-head)** — tiled attention with online softmax
+7. **FlashAttention-2 (full)** — batched multi-head with causal masking, `tl.dot` tensor cores, causal early exit
+8. **Tiled fp16 Matmul** — 2D grid + K-loop accumulation as a cuBLAS comparison baseline
+9. **Quantized Matmul** — int8/int4 with on-the-fly dequantization, bit packing, group quantization
+10. **CUDA WMMA FlashAttention-2** — hand-written CUDA implementation using `nvcuda::wmma` (see [`cuda/flash_attn/`](cuda/flash_attn/) for the full optimization log)
 
 ## Testing Quantized Matmul
 
@@ -256,7 +268,10 @@ pytest tests/test_kernels.py -k "Quantization" -v
 
 ## Requirements
 
-- Python 3.10+
-- PyTorch 2.0+ (with CUDA)
-- Triton 2.0+
+- Python 3.10+ (3.12 recommended)
+- PyTorch 2.0+ with CUDA (currently using 2.11+cu130 — see `requirements.txt`)
+- Triton 2.0+ (currently 3.6)
+- Ninja (for fast incremental CUDA C++ extension builds with header dependency tracking)
+- pytest (for the test suite)
 - NVIDIA GPU (benchmarked on A100 80GB)
+- CUDA Toolkit 12.x or 13.x (currently 13.0)

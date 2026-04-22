@@ -7,3 +7,4 @@ build/
 .ipynb_checkpoints/
 .claude/
 *.so
+*.profraw

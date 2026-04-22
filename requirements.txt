@@ -1,2 +1,14 @@
+# Core: PyTorch + Triton
+# For CUDA 13.0 (use --index-url https://download.pytorch.org/whl/cu130)
+# For CUDA 12.x (default): pip install torch torchvision torchaudio
 torch>=2.0
 triton>=2.0
+
+# Build tools (for compiling CUDA C++ extensions in cuda/ and cuda/flash_attn/)
+ninja>=1.10            # Required for fast incremental rebuilds with header dependency tracking
+
+# Testing
+pytest>=7.0
+
+# Numerical (used by some kernels and benchmarks)
+numpy>=1.20
