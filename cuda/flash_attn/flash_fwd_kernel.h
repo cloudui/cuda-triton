@@ -86,7 +86,13 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   constexpr int BLOCK_N = Traits::kBlockN;
   constexpr int HEAD_DIM = Traits::kHeadDim;
   constexpr int NTHREADS = Traits::kNThreads;
+
+  // WMMA matmul constants
   constexpr int NWARPS = NTHREADS / 32;
+  constexpr int P_TILES_PER_WARP = BLOCK_M * BLOCK_N / (16 * 16 * NWARPS);
+  constexpr int P_TILES_PER_ROW = BLOCK_N / 16;
+  constexpr int O_TILES_PER_WARP = BLOCK_M * HEAD_DIM / (16 * 16 * NWARPS);
+  constexpr int O_TILES_PER_ROW = HEAD_DIM / 16;
 
   // v1 assumption: each thread owns exactly 1 row of Q/scores/P/O.
   // Many indexing simplifications below depend on this — break it loudly if
@@ -206,21 +212,19 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
     wmma::fragment<wmma::accumulator, 16, 16, 16, float> s_frag;
 
     // Q @ K.T
-    if (warp_id == 0) {
-      for (int wi = 0; wi < BLOCK_M; wi += 16) {
-        for (int wj = 0; wj < BLOCK_N; wj += 16) {
-          wmma::fill_fragment(s_frag, 0.0f);
-          for (int wk = 0; wk < HEAD_DIM; wk += 16) {
-            wmma::load_matrix_sync(q_frag, &smem_q[wi * HEAD_DIM + wk],
-                                   HEAD_DIM);
-            wmma::load_matrix_sync(k_frag, &smem_kv[wj * HEAD_DIM + wk],
-                                   HEAD_DIM);
-            wmma::mma_sync(s_frag, q_frag, k_frag, s_frag);
-          }
-          wmma::store_matrix_sync(&smem_scores[wi * BLOCK_N + wj], s_frag,
-                                  BLOCK_N, wmma::mem_row_major);
-        }
+    for (int i = 0; i < P_TILES_PER_WARP; i++) {
+      int block_start = warp_id * P_TILES_PER_WARP + i;
+      int wi = block_start / P_TILES_PER_ROW * 16;
+      int wj = block_start % P_TILES_PER_ROW * 16;
+
+      wmma::fill_fragment(s_frag, 0.0f);
+      for (int wk = 0; wk < HEAD_DIM; wk += 16) {
+        wmma::load_matrix_sync(q_frag, &smem_q[wi * HEAD_DIM + wk], HEAD_DIM);
+        wmma::load_matrix_sync(k_frag, &smem_kv[wj * HEAD_DIM + wk], HEAD_DIM);
+        wmma::mma_sync(s_frag, q_frag, k_frag, s_frag);
       }
+      wmma::store_matrix_sync(&smem_scores[wi * BLOCK_N + wj], s_frag, BLOCK_N,
+                              wmma::mem_row_major);
     }
 
     __syncthreads();
@@ -255,20 +259,20 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
     wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> v_frag;
     wmma::fragment<wmma::accumulator, 16, 16, 16, float> o_frag;
 
-    if (warp_id == 0) {
-      for (int wi = 0; wi < BLOCK_M; wi += 16) {
-        for (int wj = 0; wj < HEAD_DIM; wj += 16) {
-          wmma::fill_fragment(o_frag, 0.0f);
-          for (int wk = 0; wk < BLOCK_N; wk += 16) {
-            wmma::load_matrix_sync(p_frag, &smem_p[wi * BLOCK_N + wk], BLOCK_N);
-            wmma::load_matrix_sync(v_frag, &smem_kv[wj + HEAD_DIM * wk],
-                                   HEAD_DIM);
-            wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
-          }
-          wmma::store_matrix_sync(&smem_o[wi * HEAD_DIM + wj], o_frag, HEAD_DIM,
-                                  wmma::mem_row_major);
-        }
+    // ... @ V
+    for (int i = 0; i < O_TILES_PER_WARP; i++) {
+      int block_start = warp_id * O_TILES_PER_WARP + i;
+      int wi = block_start / O_TILES_PER_ROW * 16;
+      int wj = block_start % O_TILES_PER_ROW * 16;
+
+      wmma::fill_fragment(o_frag, 0.0f);
+      for (int wk = 0; wk < BLOCK_N; wk += 16) {
+        wmma::load_matrix_sync(p_frag, &smem_p[wi * BLOCK_N + wk], BLOCK_N);
+        wmma::load_matrix_sync(v_frag, &smem_kv[wj + HEAD_DIM * wk], HEAD_DIM);
+        wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
       }
+      wmma::store_matrix_sync(&smem_o[wi * HEAD_DIM + wj], o_frag, HEAD_DIM,
+                              wmma::mem_row_major);
     }
 
     // Required: warp 0 wrote smem_o, all 128 threads now read it.
