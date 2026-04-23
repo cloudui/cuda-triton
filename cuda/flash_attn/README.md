@@ -14,7 +14,8 @@ Latency at `batch=4, heads=8, head_dim=64, seq=2048` and ratio vs PyTorch's `sca
 |---|---|---|---|
 | v1 (single-warp WMMA, sync loads) | 7.80 | 36.0× slower | 1.4% |
 | v2 (multi-warp WMMA distribution) | 6.23 | 29.1× slower | 1.8% |
-| **v3 (smem padding for bank conflicts)** | **1.14** | **5.3× slower** | **10.0%** |
+| v3 (smem padding for bank conflicts) | 1.14 | 5.3× slower | 10.0% |
+| **v4 (coalesced O writeback)** | **1.09** | **5.0× slower** | **10.4%** |
 
 Profile-level metric trends at the same workload:
 
@@ -152,17 +153,42 @@ The 4-way residual conflicts are exactly the unavoidable consequence of padding 
 
 ---
 
+## v4 — Coalesced global O writeback
+
+**Change:** Stage the final normalized O values into smem (reusing `smem_q`, which is free after the KV loop), sync, then have all threads cooperatively write `smem_q → o_ptr` with consecutive threads writing consecutive bytes. Each warp's 32 threads now write 32 contiguous fp16 values (64 bytes = 2 cache sectors) per memory transaction instead of one half each across 32 different cache lines.
+
+| Seq | hdim64 (ms) | hdim128 (ms) | Speedup vs v3 (hdim64) | Speedup vs v3 (hdim128) |
+|---|---|---|---|---|
+| 128  | 0.036 | 0.048 | 1.14× | 1.47× |
+| 256  | 0.061 | 0.077 | 1.05× | 1.33× |
+| 512  | 0.105 | 0.263 | 1.23× | 1.20× |
+| 1024 | 0.360 | 0.740 | 1.06× | 1.10× |
+| 2048 | 1.095 | 2.382 | 1.04× | 1.05× |
+
+**Analysis:**
+- Real but modest gains. `ncu` predicted 60% but the actual was 4-15% on hdim64 and 5-47% on hdim128.
+- The discrepancy is a useful lesson on how to read `ncu`'s "Est. Speedup": it represents the theoretical ceiling **if that metric were on the critical path**. In v3, DRAM throughput was 1% — meaning HBM had massive slack. Wasted-byte coalescing only helps when DRAM bandwidth is bottleneck, which it isn't here.
+- hdim128 saw larger relative improvement because its writeback is 2× larger (HEAD_DIM=128 vs 64) so the same wasted bytes account for a larger fraction of total time.
+- Long-sequence cases get progressively smaller wins as compute time dominates everything.
+
+**Bottlenecks after v4 (priority order, empirically updated):**
+1. Residual 4-way smem bank conflicts (loads + stores) — ~25-30% potential, addressed by v5 (XOR swizzling)
+2. Smem footprint limits occupancy to 2 blocks/SM (1 at hdim128) — addressed by v6
+3. Tail wave (33% potential at hdim64, 20% at hdim128) — partially addressed by v6
+4. cp.async — still useful but lowest priority since DRAM remains underutilized
+
+---
+
 ## Roadmap
 
-Reordered after the v3 profile flagged uncoalesced global writes as the new highest-leverage bottleneck.
+Reordered after v4 measured smaller-than-predicted gain — the smem subsystem (not DRAM) remains the dominant bottleneck.
 
 | Version | Optimization | Expected impact |
 |---------|--------------|-----------------|
-| **v4** | **Coalesce final O writeback to gmem** via warp-cooperative writes (consecutive threads write consecutive bytes within a row, then move to the next row) | ~60% per `ncu`. Cheap, mechanical change |
-| v5 | Async copies (`cp.async` + commit/wait groups) | Modest gains since DRAM throughput is still ~1%, but next ceiling once coalescing is fixed |
-| v6 | Double-buffered shared memory for K/V tiles | Compounds with v5 |
-| v7 | XOR swizzling (replace padding to get 0-way conflicts and recover ~7 KB smem) | ~30% per `ncu` on residual smem patterns |
-| v8 | Reduce shared memory footprint by holding P in fragment registers across iterations (eliminates `smem_p`) | Drops smem usage enough to fit 3 blocks/SM (hdim64); addresses tail-wave penalty and register pressure at hdim128 |
+| **v5** | **XOR swizzling** to replace padding — drops smem load/store conflicts from 4-way to 0-way and recovers ~7 KB smem from the padding | ~25% per `ncu` |
+| v6 | Reduce shared memory footprint by holding P in fragment registers across iterations (eliminates `smem_p`) | Frees smem to fit 3 blocks/SM (hdim64); also addresses tail-wave penalty and register pressure at hdim128 |
+| v7 | Async copies (`cp.async` + commit/wait groups) | Modest direct gain (DRAM not yet bottleneck), but enables v8 |
+| v8 | Double-buffered shared memory for K/V tiles | Compounds with v7 once cp.async is in place |
 | v9 | Causal masking with diagonal early-exit | Orthogonal feature; ~2× on causal workloads at long sequences |
 | v10+ | Q-fragment hoisting (4 accumulators per warp), warp-shuffle softmax, fragment-layout-aware O rescale, BLOCK_M / BLOCK_N tuning | Diminishing returns; required for parity with production |
 

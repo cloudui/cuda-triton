@@ -108,7 +108,7 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   // scores and O alias the same smem region; reserve the larger of the two
   // (using the padded strides).
   constexpr int SCORES_FLOATS = BLOCK_M * SCORE_STRIDE;
-  constexpr int O_FLOATS      = BLOCK_M * O_STRIDE;
+  constexpr int O_FLOATS = BLOCK_M * O_STRIDE;
   constexpr int SCORES_O_FLOATS =
       SCORES_FLOATS > O_FLOATS ? SCORES_FLOATS : O_FLOATS;
 
@@ -228,7 +228,8 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
       wmma::fill_fragment(s_frag, 0.0f);
       for (int wk = 0; wk < HEAD_DIM; wk += 16) {
         wmma::load_matrix_sync(q_frag, &smem_q[wi * Q_STRIDE + wk], Q_STRIDE);
-        wmma::load_matrix_sync(k_frag, &smem_kv[wj * KV_STRIDE + wk], KV_STRIDE);
+        wmma::load_matrix_sync(k_frag, &smem_kv[wj * KV_STRIDE + wk],
+                               KV_STRIDE);
         wmma::mma_sync(s_frag, q_frag, k_frag, s_frag);
       }
       wmma::store_matrix_sync(&smem_scores[wi * SCORE_STRIDE + wj], s_frag,
@@ -276,7 +277,8 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
       wmma::fill_fragment(o_frag, 0.0f);
       for (int wk = 0; wk < BLOCK_N; wk += 16) {
         wmma::load_matrix_sync(p_frag, &smem_p[wi * P_STRIDE + wk], P_STRIDE);
-        wmma::load_matrix_sync(v_frag, &smem_kv[wk * KV_STRIDE + wj], KV_STRIDE);
+        wmma::load_matrix_sync(v_frag, &smem_kv[wk * KV_STRIDE + wj],
+                               KV_STRIDE);
         wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
       }
       wmma::store_matrix_sync(&smem_o[wi * O_STRIDE + wj], o_frag, O_STRIDE,
@@ -292,9 +294,16 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
     }
   }
 
-  // __syncthreads();
-  half *o_row = o_ptr + params.o_row_stride * tid;
+  half *smem_out = smem_q;
   for (int i = 0; i < HEAD_DIM; i++) {
-    o_row[i] = __float2half(o_acc[0][i] / l_state[0]);
+    smem_out[tid * Q_STRIDE + i] = __float2half(o_acc[0][i] / l_state[0]);
+  }
+  __syncthreads();
+
+  constexpr int N_ELEMS = BLOCK_M * HEAD_DIM;
+  for (int idx = tid; idx < N_ELEMS; idx += NTHREADS) {
+    int row = idx / HEAD_DIM;
+    int col = idx % HEAD_DIM;
+    o_ptr[row * params.o_row_stride + col] = smem_out[row * Q_STRIDE + col];
   }
 }
