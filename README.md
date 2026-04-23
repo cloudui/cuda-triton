@@ -1,39 +1,34 @@
 # Triton + CUDA GPU Kernels
 
-Triton and CUDA kernel implementations for core transformer operations — elementwise activations, RMSNorm, softmax, FlashAttention-2, tiled fp16 / int8 / int4 matmul — with PyTorch reference implementations, correctness tests, and A100 benchmarks.
+Triton and CUDA kernels for transformer operations — RMSNorm, SwiGLU, softmax, FlashAttention-2, fp16 / int8 / int4 matmul — with PyTorch reference implementations, parametrized correctness tests, and A100 benchmarks.
 
 ## Kernels
 
-### RMSNorm
-Row-wise normalization used in Llama, Mistral, etc. Each Triton program handles one row — loads the full row, computes `sqrt(mean(x^2) + eps)`, normalizes, and scales by a learned weight. **3.3-4.9x faster than PyTorch.**
+### Triton
 
-### SwiGLU
-Gated activation: `SwiGLU(x, gate) = x * silu(gate)`. Elementwise operation — each Triton program processes a flat block of elements. **1.5-2.3x faster than PyTorch.**
+| Kernel | Notes | vs PyTorch |
+|---|---|---|
+| RMSNorm | One row per program, `tl.sum` reduction | 3.3-4.9× |
+| SwiGLU | Elementwise, flat blocks | 1.5-2.3× |
+| Fused RMSNorm + SwiGLU | Single kernel; halves HBM accesses vs the two-kernel version | 3-6× (1.3-6× vs `torch.compile`) |
+| Softmax | Numerically stable max-subtract | 3.5-8× (1.0-1.8× vs SDPA) |
+| Naive Attention | Single-head fused `softmax(QK^T/√d)V` for short sequences | 1.0-2.5× |
+| FlashAttention-2 | Batched, multi-head, optional causal masking; tiled attention with online softmax, `tl.dot`, causal early exit | **84-115% of native FA-2** (Tri Dao's CUDA, via PyTorch SDPA) |
+| Tiled fp16 Matmul | 2D grid + K-loop accumulation | 0.74-1.03× of cuBLAS |
+| Quantized Matmul (int8 / int4) | On-the-fly dequant; int4 with bit-packed weights and group-wise scale | 2× / 3.8× weight memory savings |
 
-### Fused RMSNorm + SwiGLU
-Combines normalization and activation into a single kernel to avoid an extra round trip to HBM. In a standard transformer FFN, these run back-to-back, so fusing them halves global memory accesses. **3-6x faster than PyTorch, 1.3-6x faster than torch.compile.**
+### CUDA
 
-### Softmax
-Numerically stable softmax with row-wise max subtraction for fp16 precision. **3.5-8x faster than PyTorch, 1.0-1.8x faster than native.**
-
-### Naive Attention
-Single-head scaled dot-product attention: `softmax(Q @ K^T / sqrt(d_k)) @ V`. All three operations fused into one kernel. Block size scales with sequence length, but performance degrades at longer sequences since the entire attention row must fit in one block. **1.0-2.5x faster than PyTorch at short sequences.** FlashAttention removes this limitation via tiling.
-
-### FlashAttention-2 (Full)
-Batched multi-head FlashAttention-2 with optional causal masking. Tiled attention with online softmax, `tl.dot` for tensor core acceleration, causal early exit optimization, and `exp2` hardware intrinsics. O(N) memory instead of O(N²). **Achieves 84-115% of PyTorch's production FlashAttention (Tri Dao's CUDA implementation) on A100.**
-
-### Tiled fp16 Matmul
-Triton tiled matmul using the same 2D grid + K-loop accumulation pattern as the quantized kernels, but with no dequantization. Serves as a baseline to isolate how much of the quantized kernel slowdown is due to dequant overhead vs cuBLAS being more optimized (software pipelining, L2 swizzling, warp specialization, etc.). **~0.74-1.03x of cuBLAS.**
-
-### Quantized Matmul (int8 / int4)
-Tiled matmul kernels that load quantized weights (int8 or int4) and dequantize on the fly to fp16 for tensor core computation. Int4 kernel handles bit-packed weights (two values per byte) with group-wise scale/zero_point. **2x / 3.8x weight memory savings.** Demonstrates the tiled matmul programming pattern (2D grid + K-loop accumulation) and quantization fundamentals.
-
-### CUDA Softmax
-Hand-written CUDA softmax kernels for comparison with Triton. Two versions: **v1** uses a three-pass approach (max, exp+sum, normalize) with float4 vectorized loads and shared memory tree reductions. **v2** caches all values in registers on the first pass (Triton-style single-pass caching), so exp/sum/normalize become register-only work with no redundant global memory reads. Uses templated `NUM_ITERS` for compile-time loop unrolling and a generic `block_reduce` helper. Currently supports rows up to N=8192 (256 threads × 8 values/thread × 4 max iterations). **v2 is 1.0-1.3x faster than v1, competitive with Triton.**
+| Kernel | Notes |
+|---|---|
+| Softmax v1 | Three-pass (max → exp+sum → normalize), `float4` loads, shared-memory tree reductions |
+| Softmax v2 | Single-pass register caching (Triton-style), templated unrolling. 1.0-1.3× faster than v1 |
+| WMMA FlashAttention-2 | Hand-written using `nvcuda::wmma`. 4 profile-driven optimization iterations from 1.4% → 10.4% of A100 fp16 peak. See [`cuda/flash_attn/`](cuda/flash_attn/). |
+| CuTe FlashAttention-2 | In-progress rewrite using CUTLASS 3.x's CuTe layout algebra (the production FA-2 idiom). See [`cuda/flash_attn_cutlass/`](cuda/flash_attn_cutlass/). |
 
 ## Benchmarks
 
-All benchmarks on NVIDIA A100 80GB with fp16.
+A100 80GB, fp16.
 
 ### RMSNorm (batch=128)
 ```
@@ -77,16 +72,6 @@ Hidden     PyTorch (ms)    Native (ms)     Triton (ms)    vs PyTorch   vs Native
 8192       0.0336          0.0100          0.0096         3.49x       1.03x
 ```
 
-### Naive Attention (single-head, d_k=64)
-```
-Seq Len      PyTorch (ms)    Native (ms)     Triton (ms)    vs PyTorch   vs Native
---------------------------------------------------------------------------------
-64           0.0217          0.0151          0.0087         2.49x       1.72x
-128          0.0193          0.0118          0.0113         1.72x       1.05x
-256          0.0202          0.0154          0.0159         1.27x       0.97x
-512          0.0369          0.0162          0.0374         0.99x       0.43x
-```
-
 ### FlashAttention-2 — Non-Causal (batch=4, heads=8, d_k=64)
 ```
 Seq Len    Naive (ms)     Flash (ms)     Native (ms)    Flash vs Naive   Flash vs Native
@@ -111,6 +96,8 @@ Seq Len    Naive (ms)     Flash (ms)     Native (ms)    Flash vs Naive   Flash v
 4096       10.3571        0.5845         0.4911         17.72x           0.84x
 ```
 
+`Native` is PyTorch's `scaled_dot_product_attention`, which dispatches to Tri Dao's CUDA FlashAttention.
+
 ### CUDA Softmax (batch=32)
 ```
 Hidden     PyTorch (ms)    Triton (ms)     CUDA (ms)       CUDA-v2 (ms)    v2 vs Tri    v2 vs v1
@@ -122,8 +109,6 @@ Hidden     PyTorch (ms)    Triton (ms)     CUDA (ms)       CUDA-v2 (ms)    v2 vs
 4096       0.0635          0.0084          0.0100          0.0086          0.97x        1.16x
 8192       0.0342          0.0100          0.0130          0.0100          1.00x        1.30x
 ```
-
-Native uses PyTorch's built-in `scaled_dot_product_attention` (Tri Dao's production FlashAttention CUDA implementation). Our Triton implementation achieves 84-115% of production performance at small-to-medium sequence lengths, narrowing to ~84% at seq_len=4096.
 
 ### Quantized Matmul (M=128)
 ```
@@ -146,57 +131,46 @@ K×N            TT vs cuBLAS   int8 vs cuBLAS   int4 vs cuBLAS   int8 vs TT fp16
 Weight Memory Savings:  int8 = 2.0x less,  int4 = 3.8x less
 ```
 
-The quantized kernels are slower than cuBLAS fp16 for two reasons. First, a naive Triton tiled matmul is already ~0.74-1.03x of cuBLAS, which has deep optimizations (software pipelining, L2 swizzling, warp specialization) that this kernel doesn't use. Second, dequantization adds per-tile overhead (cast + subtract + multiply) inside the K-loop. Comparing int8/int4 against the Triton fp16 baseline (same kernel structure, no dequant) isolates the dequant cost at ~0.71-0.84x / ~0.48-0.79x.
+The quantized kernels are slower than cuBLAS fp16 for two reasons. First, the Triton fp16 baseline is already 0.74-1.03× of cuBLAS, which has software pipelining, L2 swizzling, and warp specialization that this kernel doesn't. Second, dequantization adds per-tile overhead inside the K-loop. Comparing int8/int4 to the Triton fp16 baseline isolates the dequant cost at ~0.71-0.84× / ~0.48-0.79×.
 
-Despite loading less data from HBM (int8 = half, int4 = quarter), the bandwidth savings don't compensate for the dequant compute at these sizes — the kernels aren't purely memory-bandwidth bound. Production systems avoid this tradeoff entirely by using integer tensor core instructions (int8×int8→int32) or FP8 tensor cores (H100+), which compute directly on quantized data without dequantizing. The value of this dequantize-on-the-fly approach is memory savings (fitting larger models on fewer GPUs), not latency.
+The bandwidth savings from loading less data (int8 = half, int4 = quarter) don't compensate for the dequant compute at these sizes — the kernels aren't purely memory-bandwidth bound. Production avoids the tradeoff entirely with integer tensor core instructions (int8×int8→int32) or FP8 tensor cores (H100+), which compute on quantized data without dequantizing. The value of dequantize-on-the-fly is memory savings (fitting larger models on fewer GPUs), not latency.
 
-## Project Structure
+## Project structure
 
 ```
 cuda/
-  softmax.cu                  # CUDA softmax: vectorized float4, shared memory reductions
-  softmax_triton.cu           # CUDA softmax v2: register caching, templated unrolling
-  reduce.cuh                  # Generic block_reduce helper (max, sum)
-  bindings.cu                 # PyTorch C++ extension bindings
-  setup.py                    # Build script for CUDA extension
-kernels/
-  rmsnorm.py                  # RMSNorm: row-wise normalization
-  swiglu.py                   # SwiGLU: gated FFN activation
-  softmax.py                  # Softmax: numerically stable row normalization
-  attention.py                # Naive attention: fused scaled dot-product
-  flash_attention.py          # FlashAttention-2: single-head, tiled with online softmax
-  flash_attention_full.py     # FlashAttention-2: batched, multi-head, causal
-  fused_rmsnorm_swiglu.py     # Fused RMSNorm + SwiGLU into one kernel
-  quantized_matmul.py         # fp16/int8/int4 tiled matmul with dequantize-on-the-fly
-benchmarks/
-  bench_rmsnorm.py            # RMSNorm performance
-  bench_swiglu.py             # SwiGLU performance
-  bench_softmax.py            # Softmax performance
-  bench_attention.py          # Naive attention performance (small seqs)
-  bench_flash_attention.py    # FlashAttention single-head vs naive vs native
-  bench_flash_attention_full.py  # FlashAttention batched/multi-head/causal
-  bench_fused.py              # Fused kernel vs PyTorch vs torch.compile
-  bench_quantized_matmul.py   # Quantized matmul latency + memory savings
-tests/
-  test_kernels.py             # Correctness tests for all kernels
+  softmax.cu                  CUDA softmax: vectorized float4, smem tree reductions
+  softmax_triton.cu           CUDA softmax v2: register caching, templated unrolling
+  reduce.cuh                  Generic block_reduce helper
+  bindings.cu                 PyTorch C++ extension bindings
+  setup.py                    Build script
+  flash_attn/                 WMMA FlashAttention-2 (see directory README)
+  flash_attn_cutlass/         CuTe FlashAttention-2 (see directory README)
+kernels/                      Triton kernels (one .py per kernel)
+benchmarks/                   One bench_*.py per kernel
+tests/test_kernels.py         Parametrized correctness tests
 ```
 
-## Usage
+## Setup
 
 ```bash
-# Install (CUDA 13.0 — most recent setup)
+# CUDA 13.0 path (current setup)
 conda create -n torch_cuda13 python=3.12 -y
 conda activate torch_cuda13
 conda install -c nvidia/label/cuda-13.0.0 cuda-toolkit cuda-nvcc -y
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
 pip install -r requirements.txt   # triton, ninja, pytest, numpy
 
-# For CUDA 12.x: drop the --index-url, use the default PyTorch wheels.
+# CUDA 12.x: drop the --index-url and use the default PyTorch wheels.
+```
 
-# Run tests
+## Usage
+
+```bash
+# Tests
 python -m pytest tests/test_kernels.py -v
 
-# Run benchmarks
+# Triton benchmarks
 python benchmarks/bench_rmsnorm.py
 python benchmarks/bench_swiglu.py
 python benchmarks/bench_softmax.py
@@ -206,62 +180,32 @@ python benchmarks/bench_flash_attention_full.py
 python benchmarks/bench_fused.py
 python benchmarks/bench_quantized_matmul.py
 
-# Build and benchmark CUDA kernels (general)
+# CUDA softmax
 make build-cuda
 make bench-cuda-softmax
 
-# Build, test, and benchmark the WMMA FlashAttention CUDA kernel
+# WMMA FlashAttention
 make build-fac
 make test-fac
 make bench-fac
 ```
 
-## Kernel progression
+## Quantized matmul correctness
 
-The kernels are organized by complexity, each building on patterns from the previous:
-
-1. **SwiGLU** — elementwise op (Triton programming model basics: programs, blocks, masks)
-2. **RMSNorm** — row-wise reduction with `tl.sum`
-3. **Fused RMSNorm+SwiGLU** — kernel fusion to halve HBM bandwidth
-4. **Softmax** — numerically stable reduction (max-subtract trick for fp16)
-5. **Naive Attention** — 2D block loads, broadcasting, multi-dim indexing
-6. **FlashAttention-2 (single-head)** — tiled attention with online softmax
-7. **FlashAttention-2 (full)** — batched multi-head with causal masking, `tl.dot` tensor cores, causal early exit
-8. **Tiled fp16 Matmul** — 2D grid + K-loop accumulation as a cuBLAS comparison baseline
-9. **Quantized Matmul** — int8/int4 with on-the-fly dequantization, bit packing, group quantization
-10. **CUDA WMMA FlashAttention-2** — hand-written CUDA implementation using `nvcuda::wmma` (see [`cuda/flash_attn/`](cuda/flash_attn/) for the full optimization log)
-
-## Testing Quantized Matmul
-
-The quantization tests are split into four classes, separating concerns so failures are isolated:
-
-- **`TestInt8Quantization` / `TestInt4Quantization`** — test the quantize/dequantize utilities with no Triton dependency. If the kernel crashes, these still run.
-- **`TestFp16Matmul`** — test Triton tiled fp16 matmul against cuBLAS (`x @ W`).
-- **`TestInt8Matmul` / `TestInt4Matmul`** — test matmul correctness (PyTorch reference vs fp16 baseline, Triton vs PyTorch reference).
-
-All tests are parametrized over multiple matrix sizes to catch dimension-dependent bugs.
-
-### Error bounds
-
-Tolerances are derived from quantization theory, not guesswork:
+Test tolerances are derived from quantization theory rather than empirical fudge factors.
 
 **Roundtrip error** (quantize → dequantize): each value is rounded to the nearest integer bin, so max per-element error = `scale / 2`. For `randn` weights with range ≈ 6:
-- int8: `scale = 6/255 ≈ 0.024`, mean error ≈ `scale/4 ≈ 0.006`, max ≈ `scale/2 ≈ 0.012`
-- int4: `scale = 6/15 ≈ 0.4`, mean error ≈ `0.1`, max ≈ `0.2`
+- int8: `scale = 6/255 ≈ 0.024`, mean error ≈ 0.006, max ≈ 0.012
+- int4: `scale = 6/15 ≈ 0.4`, mean error ≈ 0.1, max ≈ 0.2
 
-**Matmul error** (quantized vs fp16): quantization error accumulates over the K-dimension dot product. Each output element sums K independent error terms, so the standard deviation grows as `scale * sqrt(K/12)`:
-- int8, K=256: `std ≈ 0.024 * sqrt(256/12) ≈ 0.11`
-- int4, K=256: `std ≈ 0.4 * sqrt(256/12) ≈ 1.85`
+**Matmul error** (quantized vs fp16): quantization error accumulates over the K dot product. Each output sums K independent error terms, so the standard deviation grows as `scale * sqrt(K/12)`:
+- int8, K=256: `std ≈ 0.024 × √(256/12) ≈ 0.11`
+- int4, K=256: `std ≈ 0.4 × √(256/12) ≈ 1.85`
 
-**Triton vs PyTorch** (same math, different execution): tight tolerance (`atol=0.1`) since the only difference is floating point accumulation order on GPU vs CPU.
+**Triton vs PyTorch** (same math, different execution): `atol=0.1` since the only difference is fp accumulation order on GPU vs CPU.
 
-### What else the tests check
-- Quantized weight dtypes and value ranges (int8 in [-128, 127], int4 nibbles in [0, 15])
-- Scale is positive for every column
-- Memory savings are exact (int8 = 2x, int4 packed = 4x vs fp16 weight bytes)
-- Output shapes match expected (M, N)
+The tests also check quantized weight dtypes and value ranges, scale positivity, exact memory savings, and output shapes. Run only the quantization utility tests (no Triton needed):
 
-Run just the quantization utility tests (no Triton needed):
 ```bash
 pytest tests/test_kernels.py -k "Quantization" -v
 ```
@@ -269,9 +213,9 @@ pytest tests/test_kernels.py -k "Quantization" -v
 ## Requirements
 
 - Python 3.10+ (3.12 recommended)
-- PyTorch 2.0+ with CUDA (currently using 2.11+cu130 — see `requirements.txt`)
+- PyTorch 2.0+ with CUDA (currently 2.11+cu130)
 - Triton 2.0+ (currently 3.6)
-- Ninja (for fast incremental CUDA C++ extension builds with header dependency tracking)
-- pytest (for the test suite)
+- Ninja (incremental builds with header dependency tracking)
+- pytest
 - NVIDIA GPU (benchmarked on A100 80GB)
 - CUDA Toolkit 12.x or 13.x (currently 13.0)
