@@ -16,3 +16,6 @@ profiles/
 *.nsys-rep
 *.qdrep
 *.qdstrm
+
+# CUTLASS submodule (cloned via `make fetch-cutlass`)
+third_party/

@@ -96,3 +96,31 @@ prof-nsys-fac:
 	@mkdir -p profiles
 	$(PROF_PRELOAD) nsys profile --stats=true -o profiles/nsys_seq$(PROF_SEQ) --force-overwrite=true \
 		python cuda/flash_attn/profile_runner.py $(PROF_ARGS)
+
+# ---- CUTLASS FlashAttention ---------------------------------------------------
+# Set CUTLASS_DIR to point at your CUTLASS checkout (defaults to third_party/cutlass).
+# Clone first: git clone https://github.com/NVIDIA/cutlass.git third_party/cutlass
+
+CUTLASS_DIR ?= third_party/cutlass
+
+# Clone CUTLASS as a submodule under third_party/
+fetch-cutlass:
+	@if [ -d "$(CUTLASS_DIR)" ]; then \
+		echo "CUTLASS already present at $(CUTLASS_DIR)"; \
+	else \
+		mkdir -p $$(dirname $(CUTLASS_DIR)); \
+		git clone --depth 1 --branch v3.6.0 https://github.com/NVIDIA/cutlass.git $(CUTLASS_DIR); \
+	fi
+
+build-fac-cutlass:
+	cd cuda/flash_attn_cutlass && CUTLASS_DIR=$(abspath $(CUTLASS_DIR)) python setup.py build_ext --inplace
+	@echo "Built flash_attn_cutlass extension"
+
+test-fac-cutlass:
+	$(PROF_PRELOAD) python -m pytest tests/test_kernels.py -v -k "CUTLASSFlashAttention"
+
+bench-fac-cutlass:
+	$(PROF_PRELOAD) python benchmarks/bench_cutlass_flash_attention.py
+
+clean-fac-cutlass:
+	rm -rf cuda/flash_attn_cutlass/build cuda/flash_attn_cutlass/*.so cuda/flash_attn_cutlass/*.egg-info
