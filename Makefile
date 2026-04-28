@@ -126,7 +126,8 @@ clean-fac-cutlass:
 	rm -rf cuda/flash_attn_cutlass/build cuda/flash_attn_cutlass/*.so cuda/flash_attn_cutlass/*.egg-info
 
 fn?=
-run-scratch:
+# run cuda file
+run-cuda:
 	nvcc -arch=sm_80 -std=c++17 --expt-relaxed-constexpr \
 	-I $(abspath $(CUTLASS_DIR))/include \
 	${fn} -o /tmp/01 && /tmp/01
