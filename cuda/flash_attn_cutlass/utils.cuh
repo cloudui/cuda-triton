@@ -5,6 +5,7 @@
 #include <cute/tensor.hpp>
 
 namespace FLASH {
+using namespace cute;
 
 // default gemm
 template <typename Tensor0, typename Tensor1, typename Tensor2,
@@ -51,5 +52,16 @@ gemm_rs(Tensor0 &acc,        // (MMA, MMA_M, MMA_N)      — fp32 accumulator
         Tensor3 const &tCsB, // (CPY, MMA_N, MMA_K)      — B in smem
         TiledMma tiled_mma, TiledCopy smem_tiled_copy_B,
         ThrCopy smem_thr_copy_B) {}
+
+// retile to row/column layout -> convert (MMA, MMA_M, MMA_N) tile to be
+// indexed like a normal array for simplicity -> (ROW, COL) <-> ((2,MMA_N), (2,
+// MMA_N)) Compatible currently with SM80
+template <typename Layout>
+__forceinline__ __device__ auto convert_layout_rowcol(Layout const &in) {
+  // (MMA, MMA_M, MMA_N), MMA=4 -> (2,2)
+  auto sl = logical_divide(in, Shape<_2>{}); // ((2, MMA/2), MMA_M, MMA_N)
+  return make_layout(make_layout(get<0, 1>(sl), get<1>(sl)),
+                     make_layout(get<0, 0>(sl), get<2>(sl)));
+}
 
 } // namespace FLASH
