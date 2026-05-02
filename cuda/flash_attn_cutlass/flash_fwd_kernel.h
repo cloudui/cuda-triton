@@ -1,21 +1,15 @@
 #pragma once
 
+#include "flash.h"
+#include "kernel_traits.cuh"
+#include "softmax.cuh"
+#include "utils.cuh"
 #include <cstdio>
 #include <cuda_fp16.h>
-#include <cuda_runtime.h>
-// #include <cute/atom/copy_atom.hpp>
-// #include <cute/atom/mma_atom.hpp>
 #include <cute/tensor.hpp>
 
+namespace FLASH {
 using namespace cute;
-
-#include "flash.h"
-#include "kernel_traits.h"
-#include "utils.cuh"
-
-// TODO: include CuTe headers
-// #include <cute/tensor.hpp>
-// #include <cutlass/cutlass.h>
 
 template <typename Traits, bool Is_causal>
 __global__ void flash_fwd_kernel(Flash_fwd_params params) {
@@ -30,7 +24,6 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   const int bh_idx = blockIdx.y;  // which (batch, head)
   const int batch_idx = bh_idx / params.num_heads;
   const int head_idx = bh_idx % params.num_heads;
-  const int tid = threadIdx.x;
   const int warp_id = tid / 32;
 
   // auto cta_coord = make_coord(blockIdx.x, blockIdx.y, _);
@@ -69,13 +62,18 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   //                         sB_layout); // (BLK_N,BLK_K,PIPE)
   // TODO: Q in register; QK temporal smem sharing, validate on block sizes
   Tensor sQ = make_tensor(reinterpret_cast<cute::half_t *>(smem),
-                          Traits::SmemLayoutQ{});
-  Tensor SK = make_tensor(sQ.data() + size(sQ), Traits::SmemLayoutKV{});
-  Tensor sV = make_tensor(sK.data() + size(SK), Traits::SmemLayoutKV{});
-  // When testing, make sure pytorch/custom kernel have same mem layout
-  // Tensor sVt
+                          typename Traits::SmemLayoutQ{});
+  Tensor sK =
+      make_tensor(sQ.data() + size(sQ), typename Traits::SmemLayoutKV{});
+  Tensor sV =
+      make_tensor(sK.data() + size(sK), typename Traits::SmemLayoutKV{});
+  Tensor sVt = make_tensor(sV.data(), typename Traits::SmemLayoutVt{});
+  Tensor sVtNoSwizzle =
+      make_tensor(sV.data(), typename Traits::SmemLayoutVtNoSwizzle{});
 
+  typename Traits::GmemTiledCopyQKV gmem_tiled_copy_QKV;
   auto gmem_thr_copy_QKV = gmem_tiled_copy_QKV.get_thread_slice(tid);
+
   Tensor tQgQ = gmem_thr_copy_QKV.partition_S(gQ);
   Tensor tQsQ = gmem_thr_copy_QKV.partition_D(sQ);
   Tensor tKgK =
@@ -89,10 +87,9 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   auto thr_mma = tiled_mma.get_thread_slice(tid);
   Tensor tSrQ = thr_mma.partition_fragment_A(sQ);
   Tensor tSrK = thr_mma.partition_fragment_B(sK);
-  // tile V tranpose?
-  Tensor tSrV;
+  Tensor tOrV = thr_mma.partition_fragment_B(sVtNoSwizzle);
 
-  Tensor acc_O = partition_fragment_C(tiled_mma, make_shape(kBlockM, kHeadDim));
+  Tensor acc_o = partition_fragment_C(tiled_mma, make_shape(kBlockM, kHeadDim));
 
   // smem to R copy
   auto smem_tiled_copy_Q =
@@ -101,7 +98,7 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
       make_tiled_copy_B(typename Traits::SmemCopyAtom{}, tiled_mma);
   // probably need to tranpose here
   auto smem_tiled_copy_V =
-      make_tiled_copy_B(typename Traits::SmemCopyAtom{}, tiled_mma);
+      make_tiled_copy_B(typename Traits::SmemCopyAtomTransposed{}, tiled_mma);
 
   auto smem_thr_copy_Q = smem_tiled_copy_Q.get_thread_slice(tid);
   auto smem_thr_copy_K = smem_tiled_copy_K.get_thread_slice(tid);
@@ -110,13 +107,18 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   // partition smem->register copy
   auto tSsQ = smem_thr_copy_Q.partition_S(sQ);
   auto tSsK = smem_thr_copy_K.partition_S(sK);
-  auto tSsV = smem_thr_copy_V.partition_S(sV);
+  auto tOsVt = smem_thr_copy_V.partition_S(sVt);
 
   // copy Q
   // TODO: check if this does load in one go
   cute::copy(gmem_thr_copy_QKV, tQgQ, tQsQ);
   // issue first K copy tile "0"
   cute::copy(gmem_thr_copy_QKV, tKgK(_, _, _, _0{}), tKsK);
+
+  clear(acc_o);
+  // initialize softmax, acc_s: (MMA, MMA_M, MMA_HEAD_DIM)
+  // rows is 2*MMA_M dim, 2 rows per thread for each MMA tile
+  FLASH::Softmax<2 * size<1>(acc_o)> softmax;
 
   const int nBlocksN = cute::ceil_div(params.seqlen_k, kBlockN);
 #pragma unroll
@@ -131,10 +133,10 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
     cute::copy(gmem_thr_copy_QKV, tVgV(_, _, _, nblock), tVsV);
     cute::cp_async_fence();
 
-    // 1. gemm P=Q@K.T
+    // 1. gemm S=Q@K.T
     FLASH::gemm(acc_s, tSrQ, tSrK, tSsQ, tSsK, tiled_mma, smem_tiled_copy_Q,
                 smem_tiled_copy_K, smem_thr_copy_Q, smem_thr_copy_K);
-
+    // wait for V
     cute::cp_async_wait<0>();
     __syncthreads();
 
@@ -144,6 +146,62 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
       cute::cp_async_fence();
     }
 
-    // 2. P softmax
+    // 2. P=softmax(S)
+    bool is_first_block = nblock == 0;
+    softmax.template softmax_rescale_o</*Is_first*/ is_first_block>(
+        acc_s, acc_o, params.scale_softmax_log2);
+    Tensor acc_s_fp16 = FLASH::convert_type<cute::half_t>(acc_s);
+    // reshape to A fragment for next matmul
+    Tensor tOrP =
+        make_tensor(acc_s_fp16.data(),
+                    FLASH::convert_c_frag_to_a_frag(acc_s_fp16.layout()));
+
+    // o = P @ V
+    FLASH::gemm_rs(acc_o, tOrP, tOrV, tOsVt, tiled_mma, smem_tiled_copy_V,
+                   smem_thr_copy_V);
   }
+
+  // final o scaling
+  softmax.normalize_softmax(acc_o);
+
+  // convert o from fp32 to fp16
+  Tensor o_fp16 = FLASH::convert_type<cute::half_t>(acc_o);
+
+  // stage O to smem, reuse Q
+  Tensor sO = make_tensor(sQ.data(), typename Traits::SmemLayoutO{});
+  auto smem_tiled_copy_O =
+      make_tiled_copy_C(typename Traits::SmemCopyAtom{}, tiled_mma);
+  auto smem_thr_copy_O = smem_tiled_copy_O.get_thread_slice(tid);
+  auto trO = smem_thr_copy_O.retile_S(o_fp16);
+  auto tsO = smem_thr_copy_O.partition_D(sO);
+  cute::copy(smem_tiled_copy_O, trO, tsO);
+
+  // gmem O, same as Q
+  typename Traits::GmemTiledCopyO gmem_tiled_copy_O;
+  Tensor mO = make_tensor(
+      make_gmem_ptr(reinterpret_cast<const cute::half_t *>(params.o_ptr) +
+                    batch_idx * params.o_batch_stride +
+                    head_idx * params.o_head_stride),
+      make_shape(params.seqlen_q, params.head_dim),
+      make_stride(params.q_row_stride, _1{}));
+  Tensor gO =
+      local_tile(mO, make_shape(kBlockM, kHeadDim), make_coord(m_block, 0));
+
+  auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(tid);
+  Tensor tOsO = gmem_thr_copy_QKV.partition_S(sO);
+  Tensor tOgO = gmem_thr_copy_QKV.partition_D(gO);
+
+  // register buffer
+  Tensor tOrO = make_fragment_like(tOgO);
+
+  // sync after r->smem copy
+  // previous section no r/wb conflicts
+  __syncthreads();
+
+  // smem->registers
+  cute::copy(gmem_thr_copy_O, tOsO, tOrO);
+  // registers->gmem
+  cute::copy(gmem_thr_copy_O, tOrO, tOgO);
 }
+
+} // namespace FLASH
