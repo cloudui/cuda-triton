@@ -164,7 +164,7 @@ template <int kNRows> struct Softmax {
   // Is_first: skip the rescale step (no prior state to correct)
   // Check_inf: clamp -inf to a finite value (needed when masking can produce
   // all-masked rows)
-  template <bool Is_first, bool Check_inf, typename Tensor0, typename Tensor1>
+  template <bool Is_first, typename Tensor0, typename Tensor1>
   __device__ __forceinline__ void
   softmax_rescale_o(Tensor0 &acc_s, // (MMA, MMA_M, MMA_N) score block, fp32
                     Tensor1 &acc_o, // (MMA, MMA_M, MMA_K) output acc, fp32

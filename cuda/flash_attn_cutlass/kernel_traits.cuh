@@ -49,34 +49,37 @@ struct Flash_fwd_kernel_traits {
   using SmemCopyAtom = Copy_Atom<SM75_U32x4_LDSM_N, cute::half_t>;
   // explicit 16-bit half x 8, transposed
   using SmemCopyAtomTransposed = Copy_Atom<SM75_U16x8_LDSM_T, cute::half_t>;
+  using SmemCopyAtomO =
+      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, cute::half_t>;
 
   // gmem intermediary static ints
   static constexpr int kGmemElementsPerLoad =
       sizeof(cute::uint128_t) / sizeof(cute::half_t);
-  static constexpr int kGmemElementsPerRow = kBlockKSmem / kGmemElementsPerLoad;
-  static constexpr int kGmemThreadsPerRow =
-      kGmemElementsPerRow / kGmemElementsPerLoad;
+  static constexpr int kGmemThreadsPerRow = kBlockKSmem / kGmemElementsPerLoad;
 
   // gmem copy defs
   using GmemCopyAtom =
-      Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL<uint128_t>, cute::half_t>;
-  using GmemCopyAtomO =
-      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, cute::half_t>;
+      Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>, cute::half_t>;
   using GmemLayout = Layout<
       Shape<Int<kNThreads / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
       Stride<Int<kGmemThreadsPerRow>, _1>>;
   using GmemLayoutO = Layout<
       Shape<Int<kNThreads / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
       Stride<Int<kGmemThreadsPerRow>, _1>>;
-  using GmemTiledCopyQKV =
-      decltype(make_tiled_copy(GmemCopyAtom{}, GmemLayout{}, Layout<_1, _8>{}));
+  using GmemTiledCopyQKV = decltype(make_tiled_copy(
+      GmemCopyAtom{}, GmemLayout{}, Layout<Shape<_1, _8>>{}));
   using GmemTiledCopyO = decltype(make_tiled_copy(
-      GmemCopyAtomO{}, GmemLayoutO{}, Layout<_1, _8>{}));
+      SmemCopyAtomO{}, GmemLayoutO{}, Layout<Shape<_1, _8>>{}));
 
   // tiled mma defs
   using TiledMma = TiledMMA<MMA_Atom<SM80_16x8x16_F32F16F16F32_TN>,
                             Layout<Shape<Int<kNWarps>, _1, _1>>,
                             Tile<Int<16 * kNWarps>, _16, _16>>;
+
+  // Smem footprint per stage: sQ + sK + sV (sO reuses sQ's space).
+  static constexpr int kSmemSize =
+      sizeof(cute::half_t) *
+      (kBlockM * kHeadDim + 2 * kBlockN * kHeadDim);
 };
 
 // Concrete configs (mirror the WMMA version's choices)
