@@ -13,11 +13,17 @@
  *   - PYBIND11_MODULE for the Python binding
  */
 
+#include <cmath>
+
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 
 #include "flash.h"
 #include "flash_fwd_launch_template.h"
+
+#ifndef M_LOG2E
+#define M_LOG2E 1.4426950408889634074
+#endif
 
 std::vector<torch::Tensor> mha_fwd(
     torch::Tensor &q,   // (batch, seqlen_q, num_heads, head_dim)
@@ -76,8 +82,8 @@ std::vector<torch::Tensor> mha_fwd(
     params.o_row_stride = output.stride(1);
     params.o_head_stride = output.stride(2);
 
-    params.scale_softmax = 1.0f / sqrtf(static_cast<float>(head_dim));
-    params.scale_softmax_log2 = params.scale_softmax * M_LOG2E;
+    params.scale_softmax = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    params.scale_softmax_log2 = params.scale_softmax * static_cast<float>(M_LOG2E);
 
     params.is_causal = is_causal;
 
