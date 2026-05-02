@@ -8,7 +8,7 @@ build/
 .claude/
 *.so
 *.profraw
-ncu-clear.sh
+*.sh
 
 # Nsight profiling artifacts
 profiles/
