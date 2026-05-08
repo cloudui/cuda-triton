@@ -16,6 +16,7 @@ static int x[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
 int main() {
   constexpr int kBlockM = 128;
   constexpr int kBlockN = 128;
+  constexpr int kHeadDim = 64;
   constexpr int kNWarps = 1;
   using TiledMma = TiledMMA<MMA_Atom<SM80_16x8x16_F32F16F16F32_TN>,
                             Layout<Shape<Int<kNWarps>, _1, _1>>,
@@ -32,18 +33,39 @@ int main() {
   Tensor acc_s = partition_fragment_C(
       tiled_mma, make_shape(Int<kBlockM>{}, Int<kBlockN>{}));
 
-  auto p = make_layout(make_shape(_8{}, _2{}, _4{}));
-  auto l = logical_divide(p, Shape<_2>{}); // ((2, MMA/2), MMA_M, MMA_N)
-  auto l1 = convert_layout_rowcol(acc_s.layout());
+  Tensor acc_o = partition_fragment_C(
+      tiled_mma, make_shape(Int<kBlockM>{}, Int<kHeadDim>{}));
 
-  print(acc_s);
+  using SmemCopyAtomO =
+      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, cute::half_t>;
+  using SmemCopyAtomO1 =
+      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<8>, cute::half_t>;
+  auto smem_tiled_copy_O = make_tiled_copy_C(SmemCopyAtomO{}, tiled_mma);
+  auto smem_tiled_copy_O1 = make_tiled_copy_C(SmemCopyAtomO{}, tiled_mma);
+
+  auto smem_thr_copy_O = smem_tiled_copy_O.get_thread_slice(0);
+  auto trO = smem_thr_copy_O.retile_S(acc_o);
+
+  print(smem_tiled_copy_O);
   printf("\n");
-  print(l);
+  print(smem_tiled_copy_O1);
   printf("\n");
-  print(l1);
-  printf("\n");
-  print(tSrQ);
-  printf("\n");
+  // print(acc_o);
+  // printf("\n");
+  // print(trO);
+  // printf("\n");
+  // auto p = make_layout(make_shape(_8{}, _2{}, _4{}));
+  // auto l = logical_divide(p, Shape<_2>{}); // ((2, MMA/2), MMA_M, MMA_N)
+  // auto l1 = convert_layout_rowcol(acc_s.layout());
+
+  // print(acc_s);
+  // printf("\n");
+  // print(l);
+  // printf("\n");
+  // print(l1);
+  // printf("\n");
+  // print(tSrQ);
+  // printf("\n");
 
   // int *data = x;
   // printf("=== row-major 8x4 === \n");
