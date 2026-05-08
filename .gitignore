@@ -20,7 +20,4 @@ profiles/
 # CUTLASS submodule (cloned via `make fetch-cutlass`)
 third_party/
 
-# cuda scratchpad
-scratch/
-
 .vscode/
