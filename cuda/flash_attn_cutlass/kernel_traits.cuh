@@ -49,6 +49,7 @@ struct Flash_fwd_kernel_traits {
   using SmemCopyAtom = Copy_Atom<SM75_U32x4_LDSM_N, cute::half_t>;
   // explicit 16-bit half x 8, transposed
   using SmemCopyAtomTransposed = Copy_Atom<SM75_U16x8_LDSM_T, cute::half_t>;
+  // for our implementation, same as Universal Copy for uint32_t
   using SmemCopyAtomO =
       Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, cute::half_t>;
 
@@ -78,8 +79,7 @@ struct Flash_fwd_kernel_traits {
 
   // Smem footprint per stage: sQ + sK + sV (sO reuses sQ's space).
   static constexpr int kSmemSize =
-      sizeof(cute::half_t) *
-      (kBlockM * kHeadDim + 2 * kBlockN * kHeadDim);
+      sizeof(cute::half_t) * (kBlockM * kHeadDim + 2 * kBlockN * kHeadDim);
 };
 
 // Concrete configs (mirror the WMMA version's choices)
