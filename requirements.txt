@@ -12,3 +12,6 @@ pytest>=7.0
 
 # Numerical (used by some kernels and benchmarks)
 numpy>=1.20
+
+# cutlass DSL
+nvidia-cutlass-dsl[cu13]
