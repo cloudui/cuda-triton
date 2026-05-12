@@ -28,6 +28,7 @@ import cutlass.cute.nvgpu.cpasync as cpasync
 import cutlass.cute.nvgpu.warp as warp
 import cutlass.cute.runtime as cute_rt
 import torch
+import utils as ampere_utils
 from cutlass.utils import SmemAllocator
 
 # =============================================================================
@@ -105,6 +106,9 @@ def flash_fwd_kernel(
     tid, _, _ = cute.arch.thread_idx()
     m_block, _, _ = cute.arch.block_idx()
 
+    seqlen_q, head_dim = mQ.shape
+    seqlen_k = mK.shape[0]
+
     # ---- B.1 gmem tile views (mirrors `local_tile(mQ, ...)`) ----
     # gQ: (kBlockM, kHeadDim)
     # gK, gV: (kBlockN, kHeadDim, n_block_max)  — last mode iterated in main loop
@@ -119,8 +123,9 @@ def flash_fwd_kernel(
     sK = smem.allocate_tensor(cutlass.Float16, sKV_layout, byte_alignment=16)
     sV = smem.allocate_tensor(cutlass.Float16, sKV_layout, byte_alignment=16)
     # sVt aliases sV's bytes — same pointer, different (transposed) layout.
-    # TODO(eric): build sVt as a view over sV.iterator with sVt_layout.
-    # In C++:  Tensor sVt = make_tensor(sV.data(), SmemLayoutVt{});
+    sVt = cute.make_tensor(sQ.iterator, sVt_layout)
+    sVt_nonswizzle_layout = cute.get_nonswizzle_portion(sVt_layout)
+    sVt_nonswizzle = cute.make_tensor(sQ.iterator, sVt_nonswizzle_layout)
 
     # ---- B.3 gmem TiledCopy partitioning ----
     gmem_tiled_copy = make_gmem_tiled_copy()
@@ -130,29 +135,133 @@ def flash_fwd_kernel(
     # tKgK, tKsK, tVgV, tVsV — same pattern. Note gK/gV are 3D (last mode is
     # the n_block iteration), so partition_S returns a tensor with that mode
     # preserved; index it as `tKgK[..., n_block]` per loop iteration.
-    # TODO(eric): build tKgK, tKsK, tVgV, tVsV.
+    tKgK = gmem_thr_copy.partition_S(gK)
+    tKsK = gmem_thr_copy.partition_D(sK)
+    tVgV = gmem_thr_copy.partition_S(gV)
+    tVsV = gmem_thr_copy.partition_D(sV)
 
     # ---- B.4 tiled MMA + register fragments ----
     tiled_mma = make_tiled_mma()
     thr_mma = tiled_mma.get_slice(tid)
-    # acc_o is the running output accumulator (M, N=kHeadDim, fp32).
-    # In C++: partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kHeadDim>>{})
-    # TODO(eric): allocate acc_o as a register fragment with shape
-    #             (MMA, MMA_M, MMA_N_HEADDIM) using tiled_mma.make_fragment_C.
+
+    #   Tensor acc_o = partition_fragment_C(
+    #       tiled_mma, make_shape(Int<kBlockM>{}, Int<kHeadDim>{}));
+    tSrQ = thr_mma.partition_fragment_A(sQ)
+    tSrK = thr_mma.partition_fragment_B(sK)
+    tSrV = thr_mma.partition_fragment_B(sVt_nonswizzle)
+
+    acc_O_shape = thr_mma.partition_shape_C((kBlockM, kHeadDim))
+    acc_O = cute.make_fragment(acc_O_shape, cute.Float32)
+    acc_O.fill(0.0)
 
     # ---- B.5 ldmatrix tiled copies for sQ, sK, sV ----
-    # SM75 ldmatrix.x4 for A; ldmatrix.x4 for B; ldmatrix.x4.trans for V^T.
-    # ld_op_A = warp.LdMatrix8x8x16bOp(transpose=False, num_matrices=4)
-    # ld_atom_A = cute.make_copy_atom(ld_op_A, cutlass.Float16)
-    # smem_tiled_copy_Q = cute.make_tiled_copy_A(ld_atom_A, tiled_mma)
-    # ... etc for K and V.
-    # TODO(eric): wire the three ldmatrix TiledCopies.
+    smem_copy_atom = cute.make_copy_atom(
+        warp.LdMatrix8x8x16bOp(transpose=False, num_matrices=4), type=cute.Float16
+    )
+    smem_copy_atom_Vt = cute.make_copy_atom(
+        warp.LdMatrix8x8x16bOp(transpose=True, num_matrices=4), type=cute.Float16
+    )
+    smem_tiled_copy_Q = cute.make_tiled_copy_A(smem_copy_atom, tiled_mma)
+    smem_tiled_copy_K = cute.make_tiled_copy_B(smem_copy_atom, tiled_mma)
+    smem_tiled_copy_V = cute.make_tiled_copy_B(smem_copy_atom_Vt, tiled_mma)
+
+    smem_thr_copy_Q = smem_tiled_copy_Q.get_slice(tid)
+    smem_thr_copy_K = smem_tiled_copy_K.get_slice(tid)
+    smem_thr_copy_V = smem_tiled_copy_V.get_slice(tid)
+
+    tSsQ = smem_thr_copy_Q.partition_S(sQ)
+    tSsK = smem_thr_copy_K.partition_S(sK)
+    tOsVt = smem_thr_copy_V.partition_S(sVt)
 
     # ---- C.1 prologue: issue Q + first K loads ----
     # cute.copy(gmem_tiled_copy, tQgQ, tQsQ)
     # cute.copy(gmem_tiled_copy, tKgK[..., 0], tKsK)
     # cute.arch.cp_async_commit_group()
-    # TODO(eric): emit prologue cp.asyncs.
+    #     # TODO(eric): emit prologue cp.asyncs.
+    #       cute::copy(gmem_tiled_copy_QKV, tQgQ, tQsQ);
+    #   // issue first K copy tile "0"
+    #   cute::copy(gmem_tiled_copy_QKV, tKgK(_, _, _, _0{}), tKsK);
+    cute.copy(gmem_tiled_copy, tQgQ, tQsQ)
+    cute.copy(gmem_tiled_copy, tKgK[None, None, None, 0], tKsK)
+    cute.arch.cp_async_commit_group()
+
+    def async_wait(n: int):
+        cute.arch.cp_async_wait_group(0)
+        cute.arch.sync_threads()
+
+    n_blocks = cute.ceil_div(seqlen_k, kBlockN)
+    for n_block in cutlass.range(n_blocks, unroll=1):
+        acc_S_shape = thr_mma.partition_shape_C((kBlockM, kBlockN))
+        acc_S = cute.make_fragment(acc_S_shape, cute.Float16)
+        acc_S.fill(0.0)
+
+        # wait on K
+        async_wait(0)
+
+        # issue V copy
+        cute.copy(gmem_tiled_copy, tVgV[None, None, None, n_block], tVsV)
+        cute.arch.cp_async_commit_group()
+
+        # Q@K.T
+        ampere_utils.gemm(
+            tiled_mma, acc_S, tSrQ, tSrK, tSsQ, tSsK, smem_thr_copy_Q, smem_thr_copy_K
+        )
+
+        # wait on V
+        async_wait()
+
+        # K block prefetch
+        if n_block < n_blocks - 1:
+            cute.copy(gmem_tiled_copy, tKgK[None, None, None, n_block + 1], tKsK)
+            cute.arch.cp_async_commit_group()
+
+        # softmax
+
+    #     const int nBlocksN = cute::ceil_div(params.seqlen_k, kBlockN);
+    # #pragma unroll
+    #   for (int nblock = 0; nblock < nBlocksN; nblock++) {
+    #     Tensor acc_s = partition_fragment_C(
+    #         tiled_mma, make_shape(Int<kBlockM>{}, Int<kBlockN>{}));
+    #     clear(acc_s);
+    #     // wait on K
+    #     cute::cp_async_wait<0>();
+    #     __syncthreads();
+    #     // issue V copy
+    #     cute::copy(gmem_tiled_copy_QKV, tVgV(_, _, _, nblock), tVsV);
+    #     cute::cp_async_fence();
+
+    #     // 1. gemm S=Q@K.T
+    #     FLASH::gemm(acc_s, tSrQ, tSrK, tSsQ, tSsK, tiled_mma, smem_tiled_copy_Q,
+    #                 smem_tiled_copy_K, smem_thr_copy_Q, smem_thr_copy_K);
+    #     // wait for V
+    #     cute::cp_async_wait<0>();
+    #     __syncthreads();
+
+    #     // next K block prefetch
+    #     if (nblock < nBlocksN - 1) { // not last block
+    #       cute::copy(gmem_tiled_copy_QKV, tKgK(_, _, _, nblock + 1), tKsK);
+    #       cute::cp_async_fence();
+    #     }
+
+    #     // 2. P=softmax(S)
+    #     if (nblock == 0) {
+    #       softmax.template softmax_rescale_o</*Is_first*/ true>(
+    #           acc_s, acc_o, params.scale_softmax_log2);
+    #     } else {
+    #       softmax.template softmax_rescale_o</*Is_first*/ false>(
+    #           acc_s, acc_o, params.scale_softmax_log2);
+    #     }
+
+    #     Tensor acc_s_fp16 = FLASH::convert_type<cute::half_t>(acc_s);
+    #     // reshape to A fragment for next matmul
+    #     Tensor tOrP =
+    #         make_tensor(acc_s_fp16.data(),
+    #                     FLASH::convert_c_frag_to_a_frag(acc_s_fp16.layout()));
+
+    #     // o = P @ V
+    #     FLASH::gemm_rs(acc_o, tOrP, tOrV, tOsVt, tiled_mma, smem_tiled_copy_V,
+    #                    smem_thr_copy_V);
+    #   }
 
     # ---- C.2 main loop ----
     # n_block_max = cute.size(gK, mode=[2])  # last mode of the 3D tile
