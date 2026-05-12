@@ -15,3 +15,5 @@ numpy>=1.20
 
 # cutlass DSL
 nvidia-cutlass-dsl[cu13]
+# pip install 'quack-kernels[cu13]' --extra-index-url https://download.pytorch.org/whl/cu130
+quack-kernels[cu13]
