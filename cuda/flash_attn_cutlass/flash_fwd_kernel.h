@@ -116,6 +116,7 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   cute::copy(gmem_tiled_copy_QKV, tQgQ, tQsQ);
   // issue first K copy tile "0"
   cute::copy(gmem_tiled_copy_QKV, tKgK(_, _, _, _0{}), tKsK);
+  cute::cp_async_fence();
 
   clear(acc_o);
   // initialize softmax, acc_s: (MMA, MMA_M, MMA_HEAD_DIM)
