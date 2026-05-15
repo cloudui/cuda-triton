@@ -90,12 +90,14 @@ std::vector<torch::Tensor> mha_fwd(
     // --- Dispatch by head_dim ---
     auto stream = at::cuda::getCurrentCUDAStream().stream();
 
-    if (head_dim == 64) {
+    if (head_dim == 32) {
+        run_mha_fwd_hdim32(params, stream);
+    } else if (head_dim == 64) {
         run_mha_fwd_hdim64(params, stream);
     } else if (head_dim == 128) {
         run_mha_fwd_hdim128(params, stream);
     } else {
-        TORCH_CHECK(false, "FlashAttention only supports head_dim 64 and 128, got ", head_dim);
+        TORCH_CHECK(false, "FlashAttention only supports head_dim 32, 64, 128, got ", head_dim);
     }
 
     return {output, softmax_lse};

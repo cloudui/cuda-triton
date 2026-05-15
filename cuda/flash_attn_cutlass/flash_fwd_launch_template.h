@@ -35,6 +35,11 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     kernel<<<grid, block, smem_size, stream>>>(params);
 }
 
+inline void run_mha_fwd_hdim32(Flash_fwd_params &params, cudaStream_t stream) {
+    assert(!params.is_causal && "causal not implemented yet");
+    run_flash_fwd<Traits_hdim32, false>(params, stream);
+}
+
 inline void run_mha_fwd_hdim64(Flash_fwd_params &params, cudaStream_t stream) {
     // Causal not yet implemented — fall through to non-causal.
     assert(!params.is_causal && "causal not implemented yet");

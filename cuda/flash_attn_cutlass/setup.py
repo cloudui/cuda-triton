@@ -43,6 +43,7 @@ setup(
             "flash_attn_cutlass",
             [
                 "flash_api.cu",
+                "flash_fwd_hdim32_fp16_sm80.cu",
                 "flash_fwd_hdim64_fp16_sm80.cu",
                 # "flash_fwd_hdim64_fp16_causal_sm80.cu",   # disabled: causal not implemented
                 "flash_fwd_hdim128_fp16_sm80.cu",

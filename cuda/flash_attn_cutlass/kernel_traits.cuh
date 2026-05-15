@@ -83,5 +83,6 @@ struct Flash_fwd_kernel_traits {
 };
 
 // Concrete configs (mirror the WMMA version's choices)
+using Traits_hdim32 = Flash_fwd_kernel_traits<32, 128, 64, 4>;
 using Traits_hdim64 = Flash_fwd_kernel_traits<64, 128, 64, 4>;
 using Traits_hdim128 = Flash_fwd_kernel_traits<128, 128, 64, 4>;
