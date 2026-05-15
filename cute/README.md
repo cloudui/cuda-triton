@@ -1,5 +1,7 @@
 # CuTe Python DSL — FlashAttention-2 learning track
 
+> **Status: in-progress.** This is the planned follow-up to the [CuTe FA2 blog post](../blog.md), porting the same kernel from C++ CUTLASS to NVIDIA's new Python CuTe DSL. The early files (`00_layouts.py` through `03_tiled_mma.py`) are working; `flash_fwd.py` is a skeleton with TODOs at each stage. Open to finish, not finished yet.
+
 A Python-DSL counterpart to `cuda/flash_attn_cutlass/`. The C++ version is
 already working; this directory is for learning the **Python DSL** by
 re-deriving the same kernel piece by piece.
