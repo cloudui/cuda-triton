@@ -1,5 +1,10 @@
 // Tiled GEMM kernel using TN layout -> A: (M x K) B: (N x K)
-// K is contiguous dim
+// K is contiguous dim. Used in the blog's "MMA Loop: QK^T GEMM" section as
+// the standalone reference for the inner GEMM pattern (without the surrounding
+// FA2 softmax/online-rescale machinery).
+//
+// Build & run:
+//   nvcc -std=c++17 -arch=sm_80 -I<cutlass>/include scratch/05_gemm.cu -o scratch/05_gemm && ./scratch/05_gemm
 #include <cstdio>
 #include <cuda_fp16.h>
 #include <cute/atom/copy_atom.hpp>

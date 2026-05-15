@@ -1,3 +1,9 @@
+// Wrap a raw pointer in row-major and column-major CuTe layouts and slice
+// rows/columns. Used in the blog's "Tensors" section.
+//
+// Build & run:
+//   nvcc -std=c++17 -I<cutlass>/include scratch/02_tensor.cu -o scratch/02_tensor && ./scratch/02_tensor
+
 #include <cstdio>
 #include <cute/tensor.hpp>
 using namespace cute;
@@ -26,7 +32,7 @@ int main() {
   printf("\n");
 
   printf("=== col-major 4x8 === \n");
-  auto l_col = make_layout(make_shape(_8{}, _4{}), make_stride(_1{}, _4{}));
+  auto l_col = make_layout(make_shape(_8{}, _4{}), make_stride(_1{}, _8{}));
   auto t_col = make_tensor(data, l_col);
   print_layout(l_col);
   printf("\n");

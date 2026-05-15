@@ -1,3 +1,11 @@
+// Single-warp `SM80_16x8x16` MMA, no SMEM staging: A/B come straight from
+// gmem partitioned via the MMA fragment layout. The simplest possible
+// "I issued one tensor-core instruction" demo. Used in the blog's "Tiled MMA"
+// section.
+//
+// Build & run:
+//   nvcc -std=c++17 -arch=sm_80 -I<cutlass>/include scratch/03_mma.cu -o scratch/03_mma && ./scratch/03_mma
+
 #include <cstdio>
 #include <cuda_fp16.h>
 #include <cute/atom/copy_atom.hpp>

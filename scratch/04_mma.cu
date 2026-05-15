@@ -1,3 +1,11 @@
+// Full single-warp 16x8x16 MMA with the proper gmem -> smem -> regs -> MMA
+// pipeline (cp.async-style copy via TiledCopy + ldmatrix), then verifies
+// against a CPU reference. Used in the blog's "Tiled MMA" + "Tiled Copy
+// A, B, C" sections to show the end-to-end staging.
+//
+// Build & run:
+//   nvcc -std=c++17 -arch=sm_80 -I<cutlass>/include scratch/04_mma.cu -o scratch/04_mma && ./scratch/04_mma
+
 #include <cstdio>
 #include <cuda_fp16.h>
 #include <cute/atom/copy_atom.hpp>
