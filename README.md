@@ -2,6 +2,8 @@
 
 Triton and CUDA kernels for transformer operations — RMSNorm, SwiGLU, softmax, FlashAttention-2, fp16 / int8 / int4 matmul — with PyTorch reference implementations, parametrized correctness tests, and A100 benchmarks.
 
+> **Blog post:** [**FlashAttention, but the Actual Details**](#) — line-by-line walkthrough of the CuTe FA2 implementation in [`cuda/flash_attn_cutlass/`](cuda/flash_attn_cutlass/), covering swizzling, tiled MMAs, online softmax, the V-copy + transpose, and at least one finding about an unused line in Tri Dao's source. The companion `scratch/` directory has standalone runnable demos for each concept ([scratch README](scratch/README.md)).
+
 ## Kernels
 
 ### Triton
@@ -24,7 +26,7 @@ Triton and CUDA kernels for transformer operations — RMSNorm, SwiGLU, softmax,
 | Softmax v1 | Three-pass (max → exp+sum → normalize), `float4` loads, shared-memory tree reductions |
 | Softmax v2 | Single-pass register caching (Triton-style), templated unrolling. 1.0-1.3× faster than v1 |
 | WMMA FlashAttention-2 | Hand-written using `nvcuda::wmma`. 4 profile-driven optimization iterations from 1.4% → 10.4% of A100 fp16 peak. See [`cuda/flash_attn/`](cuda/flash_attn/). |
-| CuTe FlashAttention-2 | In-progress rewrite using CUTLASS 3.x's CuTe layout algebra (the production FA-2 idiom). See [`cuda/flash_attn_cutlass/`](cuda/flash_attn_cutlass/). |
+| CuTe FlashAttention-2 | Production-style rewrite using CUTLASS 3.x's CuTe layout algebra. **Within ~1-15% of native FA-2** across hdim=64/128 on A100. See [`cuda/flash_attn_cutlass/`](cuda/flash_attn_cutlass/). |
 
 ## Benchmarks
 
@@ -97,6 +99,42 @@ Seq Len    Naive (ms)     Flash (ms)     Native (ms)    Flash vs Naive   Flash v
 ```
 
 `Native` is PyTorch's `scaled_dot_product_attention`, which dispatches to Tri Dao's CUDA FlashAttention.
+
+### CuTe FlashAttention-2 (CUDA, batch=4, heads=8)
+
+A100 40GB, fp16. CUTLASS 3.x CuTe-based rewrite vs. production FA-2 (via SDPA). `% peak` is fraction of A100 fp16 tensor-core peak (312 TFLOP/s).
+
+```
+hdim=64
+Seq Len    CuTe (ms)    Native (ms)   Ratio   TFLOP/s   % peak
+----------------------------------------------------------------
+128          0.0149       0.0156      0.96x      9.0     2.9%
+256          0.0186       0.0177      1.05x     28.9     9.3%
+512          0.0334       0.0332      1.01x     64.3    20.6%
+1024         0.0872       0.0764      1.14x     98.5    31.6%
+2048         0.2379       0.2186      1.09x    144.4    46.3%
+4096         0.8786       0.8501      1.03x    156.4    50.1%
+8192         3.3720       3.2199      1.05x    163.0    52.3%
+16384       13.4770      12.8500      1.05x    163.2    52.3%
+32768       53.4953      51.1262      1.05x    164.4    52.7%
+65536      213.6306     204.8852      1.04x    164.7    52.8%
+
+hdim=128
+Seq Len    CuTe (ms)    Native (ms)   Ratio   TFLOP/s   % peak
+----------------------------------------------------------------
+128          0.0159       0.0167      0.95x     16.9     5.4%
+256          0.0227       0.0226      1.01x     47.3    15.2%
+512          0.0485       0.0499      0.97x     88.5    28.4%
+1024         0.1309       0.1245      1.05x    131.3    42.1%
+2048         0.4339       0.3808      1.14x    158.4    50.8%
+4096         1.4727       1.4979      0.98x    186.6    59.8%
+8192         5.8427       5.6883      1.03x    188.2    60.3%
+16384       22.5305      22.7326      0.99x    195.2    62.6%
+32768       89.4886      90.9835      0.98x    196.6    63.0%
+65536      361.0303     365.8720      0.99x    194.9    62.5%
+```
+
+Within ~1-14% of native FA-2 across all configurations, **at parity (and occasionally faster) for long context** out to 64K-token sequences. Sustains **~53% of A100 fp16 peak at hdim=64** and **~63% at hdim=128** — comparable to production FA-2's reported utilization. See [`cuda/flash_attn_cutlass/CUTE_NOTES.md`](cuda/flash_attn_cutlass/CUTE_NOTES.md) for the experimental finding that several "defensive" CuTe idioms inherited from CUTLASS examples (`SmemLayoutVtNoSwizzle`, the variable `kSwizzle` formula) are no-ops on SM80.
 
 ### CUDA Softmax (batch=32)
 ```

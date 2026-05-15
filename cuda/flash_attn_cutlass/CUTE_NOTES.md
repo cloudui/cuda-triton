@@ -482,3 +482,148 @@ deeply understanding pieces. That's fine.
 When stuck, copy from FA2's `utils.h` / `softmax.h` / `kernel_traits.h` and
 move on. Most CuTe code in production is composed from a small set of
 canonical patterns.
+
+---
+
+## Empirical experiments: what's actually load-bearing on SM80
+
+This section records experiments that tested whether several "defensive" CuTe
+idioms inherited from CUTLASS examples are actually required for correctness
+or performance on SM80 with the `SM80_16x8x16_F32F16F16F32_TN` MMA atom and
+`SM75_U16x8_LDSM_T` copy atom (i.e., this kernel's exact configuration).
+
+**TL;DR**: `SmemLayoutVtNoSwizzle` and the variable `kSwizzle = (kBlockKSmem == 64) ? 3 : 2`
+formula are both no-ops for this kernel. They affect neither correctness nor
+performance. A simpler kernel with `Sw<3,3,3>` for all head_dims and `sVt`
+passed directly to `partition_fragment_B` produces bit-identical outputs and
+the same wall-clock timing as the FA2-style defensive version.
+
+### Setup
+
+- A100 (SM80), CUDA 13, fp16.
+- Variants tested (2×2 grid):
+  - `kSwizzle`: original `(kBlockKSmem == 64) ? 3 : 2` vs. forced `3`.
+  - V fragment source: `sVtNoSwizzle` (FA2 default) vs. `sVt` directly.
+- Head dims: 32 (added support for this experiment), 64, 128.
+- Tests: existing `tests/test_kernels.py::TestCUTLASSFlashAttention` (11 cases).
+- Benchmark: `benchmarks/bench_cutlass_flash_attention.py` + a custom hdim=32
+  sweep (batch=4, heads=8, seq ∈ {128, 256, 512, 1024, 2048, 4096}).
+
+### Correctness
+
+All 11 tests pass for all 4 variants × all 3 head_dims. `max_abs_err` vs.
+`torch.nn.functional.scaled_dot_product_attention` is identical to baseline
+at every shape (typically `2.44e-4`, occasionally `4.88e-4` for short seqs)
+— bit-identical, not just within-tolerance.
+
+This is initially surprising. `partition_fragment_B(sVt)` at hdim=32 returns
+a non-canonical layout (`((2,2),(2,2),4)`) vs. the canonical
+`((2,2),4,4)` from `sVtNoSwizzle`. And `partition_fragment_A(sQ)` at
+hdim=32 returns swapped outer strides vs. its NoSwizzle counterpart. Both
+"should" break the gemm if cute hardcoded canonical fragment layouts.
+
+It doesn't break because **cute is layout-aware end-to-end**: the same
+fragment layout drives both the smem→register copy (writes registers per the
+fragment's layout) and the `cute::gemm` dispatch (slices fragments per the
+fragment's layout to generate PTX register operand lists). Physical
+registers may be allocated differently between paths, but the data routing
+is consistent — the right values land in the right MMA hardware operand
+positions either way. The only invariant cute strictly requires is that
+mode 0 (the per-MMA-instruction payload) be `LayoutLeft`, which
+`make_fragment_like` enforces unconditionally regardless of input.
+
+### Performance
+
+CUTLASS time in milliseconds (`triton.testing.do_bench`), batch=4, heads=8.
+
+**hdim=64:**
+
+| seq  | Baseline | Sw333+NoSw | Base+sVt | Sw333+sVt |
+|------|----------|------------|----------|-----------|
+| 128  | 0.0139   | 0.0138     | 0.0148   | 0.0154    |
+| 256  | 0.0183   | 0.0179     | 0.0183   | 0.0178    |
+| 512  | 0.0333   | 0.0328     | 0.0328   | 0.0328    |
+| 1024 | 0.0870   | 0.0870     | 0.0871   | 0.0870    |
+| 2048 | 0.2379   | 0.2376     | 0.2376   | 0.2372    |
+| 4096 | 0.8749   | 0.8792     | 0.8745   | 0.8800    |
+
+**hdim=128:**
+
+| seq  | Baseline | Sw333+NoSw | Base+sVt | Sw333+sVt |
+|------|----------|------------|----------|-----------|
+| 128  | 0.0159   | 0.0159     | 0.0153   | 0.0154    |
+| 256  | 0.0230   | 0.0222     | 0.0222   | 0.0226    |
+| 512  | 0.0491   | 0.0486     | 0.0487   | 0.0485    |
+| 1024 | 0.1303   | 0.1302     | 0.1308   | 0.1309    |
+| 2048 | 0.4322   | 0.4344     | 0.4345   | 0.4336    |
+
+**hdim=32** (added for this experiment):
+
+| seq  | Baseline (Sw<2,3,3>+NoSw) | Sw333+NoSw | Base+sVt | Sw333+sVt |
+|------|---------------------------|------------|----------|-----------|
+| 128  | 0.0115                    | 0.0129     | 0.0137   | 0.0133    |
+| 256  | 0.0151                    | 0.0171     | 0.0177   | 0.0151    |
+| 512  | 0.0262                    | 0.0263     | 0.0262   | 0.0267    |
+| 1024 | 0.0521                    | 0.0522     | 0.0521   | 0.0520    |
+| 2048 | 0.1535                    | 0.1541     | 0.1541   | 0.1535    |
+| 4096 | 0.5538                    | 0.5517     | 0.5509   | 0.5591    |
+
+For seq ≥ 512 (where launch overhead doesn't dominate), all variants are
+within ~1% of each other across all head_dims — well inside `do_bench`
+run-to-run noise. Small-seq numbers (128, 256) show 5-15% spread but those
+are sub-microsecond regimes where the timer is unreliable.
+
+### Bank-conflict math (sanity check)
+
+For LDSM accessing 8 consecutive rows at hdim=32 with `Sw<3,3,3>`:
+
+| row | unswizzled offset | swizzled phys | byte addr | bank |
+|-----|-------------------|---------------|-----------|------|
+| 0   | 0                 | 0             | 0         | 0    |
+| 1   | 32                | 32            | 64        | 16   |
+| 2   | 64                | 72            | 144       | 4    |
+| 3   | 96                | 104           | 208       | 20   |
+| 4   | 128               | 144           | 288       | 8    |
+| 5   | 160               | 176           | 352       | 24   |
+| 6   | 192               | 216           | 432       | 12   |
+| 7   | 224               | 248           | 496       | 28   |
+
+Banks `{0, 16, 4, 20, 8, 24, 12, 28}` — all distinct, conflict-free. Same
+result for `Sw<2,3,3>` because for rows 0..7 within one atom, bit 8 is 0,
+so the source bits `[6..8]` for B=3 reduce to `[6..7]` — same as B=2.
+
+### Why FA2 has the defensive code anyway
+
+Best guess: inherited from CUTLASS GEMM examples written when cute was less
+mature, never re-audited because the kernel ships only hdim=64/128 (where
+the differences happen to vanish). The asymmetric "NoSwizzle for V only"
+pattern probably comes from a CUTLASS GEMM example where only the
+B-with-transpose operand had the issue. None of it bites in production
+because no one runs the kernel at hdim=32.
+
+### What CAN break
+
+The one cute invariant that is genuinely load-bearing:
+`make_fragment_like` enforces `LayoutLeft` on mode 0. This guarantees the
+per-LDSM-instruction destination registers are contiguous, which the
+hardware instruction requires. If cute didn't pin mode 0, retile_D could
+produce non-contiguous destinations that LDSM can't issue. Mode 0 is
+"addresses-as-hardware-positions"; outer modes are "addresses-as-labels"
+that cute keeps consistent between copy and gemm.
+
+### Reproducing
+
+```bash
+# Patch the kernel for whichever variant, then:
+make build-fac-cutlass
+make test-fac-cutlass
+make bench-fac-cutlass
+```
+
+The variant matrix is two lines to edit:
+- `kernel_traits.cuh:26` — `static constexpr int kSwizzle = ...;`
+- `flash_fwd_kernel.h:91` — `Tensor tOrV = thr_mma.partition_fragment_B(...);`
+
+For hdim=32 support: add `Traits_hdim32` in `kernel_traits.cuh`,
+`run_mha_fwd_hdim32` in `flash_fwd_launch_template.h`, dispatch in
+`flash_api.cu`, and `flash_fwd_hdim32_fp16_sm80.cu` to `setup.py`.

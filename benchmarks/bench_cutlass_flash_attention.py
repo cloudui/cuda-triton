@@ -30,6 +30,7 @@ HAS_WMMA = False
 try:
     sys.path.insert(0, "cuda/flash_attn")
     import flash_attn_cuda  # noqa: F401
+
     HAS_WMMA = True
 except ImportError:
     pass
@@ -51,15 +52,17 @@ def correctness_check(head_dim, seq_len=128):
     mean_err = (out - ref).abs().mean().item()
     ok = max_err < 0.1  # generous fp16 tolerance
     status = "✓" if ok else "✗"
-    print(f"  [{status}] head_dim={head_dim}, seq={seq_len}: "
-          f"max_err={max_err:.4f}, mean_err={mean_err:.4f}")
+    print(
+        f"  [{status}] head_dim={head_dim}, seq={seq_len}: "
+        f"max_err={max_err:.4f}, mean_err={mean_err:.4f}"
+    )
     return ok
 
 
 def benchmark():
     batch = 4
     n_heads = 8
-    seq_lens = [128, 256, 512, 1024, 2048, 4096]
+    seq_lens = [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
 
     print("Correctness check:")
     for hd in [64, 128]:
@@ -74,27 +77,30 @@ def benchmark():
         cols = ["Seq Len", "CUTLASS (ms)"]
         if HAS_WMMA:
             cols.append("WMMA (ms)")
-        cols.extend(["SDPA (ms)", "CUTLASS/SDPA"])
+        cols.extend(["SDPA (ms)", "CUTLASS/SDPA", "TFLOP/s", "% peak"])
         print("  ".join(f"{c:<16}" for c in cols))
         print("-" * 100)
+        # A100 fp16 tensor-core peak (sustained, dense, no sparsity)
+        A100_FP16_PEAK_TFLOPS = 312.0
 
         for seq_len in seq_lens:
             # Layout: (batch, seqlen, num_heads, head_dim)
-            q = torch.randn(batch, seq_len, n_heads, head_dim,
-                            device="cuda", dtype=torch.float16)
-            k = torch.randn(batch, seq_len, n_heads, head_dim,
-                            device="cuda", dtype=torch.float16)
-            v = torch.randn(batch, seq_len, n_heads, head_dim,
-                            device="cuda", dtype=torch.float16)
+            q = torch.randn(
+                batch, seq_len, n_heads, head_dim, device="cuda", dtype=torch.float16
+            )
+            k = torch.randn(
+                batch, seq_len, n_heads, head_dim, device="cuda", dtype=torch.float16
+            )
+            v = torch.randn(
+                batch, seq_len, n_heads, head_dim, device="cuda", dtype=torch.float16
+            )
 
             # PyTorch SDPA wants (batch, heads, seqlen, head_dim)
             q_nat = q.transpose(1, 2).contiguous()
             k_nat = k.transpose(1, 2).contiguous()
             v_nat = v.transpose(1, 2).contiguous()
 
-            ms_cutlass = do_bench(
-                lambda: flash_attn_cutlass.mha_fwd(q, k, v, False)
-            )
+            ms_cutlass = do_bench(lambda: flash_attn_cutlass.mha_fwd(q, k, v, False))
             ms_native = do_bench(
                 lambda: F.scaled_dot_product_attention(
                     q_nat, k_nat, v_nat, is_causal=False
@@ -103,12 +109,16 @@ def benchmark():
 
             row = [str(seq_len), f"{ms_cutlass:.4f}"]
             if HAS_WMMA:
-                ms_wmma = do_bench(
-                    lambda: flash_attn_cuda.mha_fwd(q, k, v, False)
-                )
+                ms_wmma = do_bench(lambda: flash_attn_cuda.mha_fwd(q, k, v, False))
                 row.append(f"{ms_wmma:.4f}")
             row.append(f"{ms_native:.4f}")
             row.append(f"{ms_cutlass / ms_native:.2f}x")
+            # FLOPs for non-causal attention: 2 matmuls × 2 ops/MAC ×
+            # batch × heads × seq^2 × head_dim
+            flops = 4 * batch * n_heads * seq_len * seq_len * head_dim
+            tflops = flops / (ms_cutlass * 1e-3) / 1e12
+            row.append(f"{tflops:.1f}")
+            row.append(f"{100 * tflops / A100_FP16_PEAK_TFLOPS:.1f}%")
             print("  ".join(f"{c:<16}" for c in row))
 
 
