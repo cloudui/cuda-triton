@@ -226,6 +226,12 @@ make bench-cuda-softmax
 make build-fac
 make test-fac
 make bench-fac
+
+# CuTe FlashAttention (CUTLASS 3.x). Requires CUTLASS headers — fetch once.
+make fetch-cutlass         # clones v3.6.0 into third_party/cutlass
+make build-fac-cutlass
+make test-fac-cutlass
+make bench-fac-cutlass
 ```
 
 ## Quantized matmul correctness
