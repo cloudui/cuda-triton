@@ -28,8 +28,7 @@
 std::vector<torch::Tensor> mha_fwd(
     torch::Tensor &q,   // (batch, seqlen_q, num_heads, head_dim)
     torch::Tensor &k,   // (batch, seqlen_k, num_heads_k, head_dim)
-    torch::Tensor &v,   // (batch, seqlen_k, num_heads_k, head_dim)
-    bool is_causal
+    torch::Tensor &v    // (batch, seqlen_k, num_heads_k, head_dim)
 ) {
     // --- Input validation ---
     // TORCH_CHECK(q.dtype() == torch::kHalf, "Only fp16 supported");
@@ -84,8 +83,6 @@ std::vector<torch::Tensor> mha_fwd(
 
     params.scale_softmax = 1.0f / std::sqrt(static_cast<float>(head_dim));
     params.scale_softmax_log2 = params.scale_softmax * static_cast<float>(M_LOG2E);
-
-    params.is_causal = is_causal;
 
     // --- Dispatch by head_dim ---
     auto stream = at::cuda::getCurrentCUDAStream().stream();

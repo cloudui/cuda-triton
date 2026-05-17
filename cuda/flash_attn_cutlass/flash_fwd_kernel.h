@@ -11,7 +11,7 @@
 namespace FLASH {
 using namespace cute;
 
-template <typename Traits, bool Is_causal>
+template <typename Traits>
 __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   const int tid = threadIdx.x;
 

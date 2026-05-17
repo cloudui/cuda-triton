@@ -13,7 +13,7 @@
 #include "flash_fwd_kernel.h"
 #include "kernel_traits.cuh"
 
-template <typename Traits, bool Is_causal>
+template <typename Traits>
 void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     constexpr int kBlockM = Traits::kBlockM;
     constexpr int smem_size = Traits::kSmemSize;
@@ -22,7 +22,7 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     dim3 grid(num_m_blocks, params.batch_size * params.num_heads);
     dim3 block(Traits::kNThreads);
 
-    auto kernel = &FLASH::flash_fwd_kernel<Traits, Is_causal>;
+    auto kernel = &FLASH::flash_fwd_kernel<Traits>;
 
     if (smem_size > 48 * 1024) {
         cudaFuncSetAttribute(
@@ -36,17 +36,13 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
 }
 
 inline void run_mha_fwd_hdim32(Flash_fwd_params &params, cudaStream_t stream) {
-    assert(!params.is_causal && "causal not implemented yet");
-    run_flash_fwd<Traits_hdim32, false>(params, stream);
+    run_flash_fwd<Traits_hdim32>(params, stream);
 }
 
 inline void run_mha_fwd_hdim64(Flash_fwd_params &params, cudaStream_t stream) {
-    // Causal not yet implemented — fall through to non-causal.
-    assert(!params.is_causal && "causal not implemented yet");
-    run_flash_fwd<Traits_hdim64, false>(params, stream);
+    run_flash_fwd<Traits_hdim64>(params, stream);
 }
 
 inline void run_mha_fwd_hdim128(Flash_fwd_params &params, cudaStream_t stream) {
-    assert(!params.is_causal && "causal not implemented yet");
-    run_flash_fwd<Traits_hdim128, false>(params, stream);
+    run_flash_fwd<Traits_hdim128>(params, stream);
 }

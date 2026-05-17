@@ -28,7 +28,7 @@ CUTLASS_DIR=/path/to/cutlass make build-fac-cutlass
 | `kernel_traits.h` | CuTe type composition: smem `Layout`s with swizzle, `TiledMma`, `Copy_Atom`s |
 | `flash_fwd_kernel.h` | Kernel body |
 | `flash_fwd_launch_template.h` | Grid/block sizing and `cudaFuncSetAttribute` for extended smem |
-| `flash_fwd_hdim{64,128}_fp16{,_causal}_sm80.cu` | Per-config instantiations |
+| `flash_fwd_hdim{32,64,128}_fp16_sm80.cu` | Per-config instantiations |
 | `setup.py` | Build script with CUTLASS include path |
 
 ## Performance

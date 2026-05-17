@@ -73,10 +73,8 @@ struct Flash_fwd_params {
     float scale_softmax;
     float scale_softmax_log2;
 
-    // Causal masking
-    bool is_causal;
-
     // TODO: Add these if you extend beyond the basics:
+    // - Causal masking
     // - Dropout probability and RNG state
     // - Alibi slopes for position-dependent attention bias
     // - Paged KV cache pointers (for inference)
