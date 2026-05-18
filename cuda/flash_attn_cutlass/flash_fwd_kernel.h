@@ -119,7 +119,7 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   cute::cp_async_fence();
 
   clear(acc_o);
-  // initialize softmax, acc_s: (MMA, MMA_M, MMA_HEAD_DIM)
+  // initialize softmax, acc_o: (MMA, MMA_M, MMA_HEAD_DIM)
   // rows is 2*MMA_M dim, 2 rows per thread for each MMA tile
   FLASH::Softmax<2 * size<1>(acc_o)> softmax;
 
