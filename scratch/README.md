@@ -2,6 +2,8 @@
 
 You can't write CuTe without testing. These are the experiments I built up while writing the blog post -- each file is keyed to one or more sections of my blog post (to be linked soon) so you can run the demo for the specific concept you're stuck on.
 
+https://blog.echen.io/p/flashattention-2-in-cute-from-scratch/
+
 ## Usage
 
 ```sh
