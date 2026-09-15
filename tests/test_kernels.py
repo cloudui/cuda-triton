@@ -55,6 +55,31 @@ from kernels.quantized_matmul import (
 from kernels.rmsnorm import rmsnorm_native, rmsnorm_pytorch, rmsnorm_triton
 from kernels.softmax import softmax_native, softmax_pytorch, softmax_triton
 from kernels.swiglu import swiglu_native, swiglu_pytorch, swiglu_triton
+from kernels.vector_add import vector_add, vector_add_pytorch
+
+
+class TestVectorAdd:
+    def setup_method(self):
+        torch.manual_seed(42)
+        self.x = torch.randn(1 << 20, device="cuda", dtype=torch.float32)
+        self.y = torch.randn(1 << 20, device="cuda", dtype=torch.float32)
+
+    def test_pytorch_shape(self):
+        out = vector_add_pytorch(self.x, self.y)
+        assert out.shape == self.x.shape
+
+    def test_triton_matches_pytorch(self):
+        ref = vector_add_pytorch(self.x, self.y)
+        out = vector_add(self.x, self.y)
+        torch.testing.assert_close(out, ref)
+
+    def test_triton_unaligned_size(self):
+        """Sizes not divisible by BLOCK_SIZE exercise the mask path."""
+        x = torch.randn(1000003, device="cuda", dtype=torch.float32)
+        y = torch.randn(1000003, device="cuda", dtype=torch.float32)
+        ref = vector_add_pytorch(x, y)
+        out = vector_add(x, y)
+        torch.testing.assert_close(out, ref)
 
 
 class TestRMSNorm:
@@ -535,6 +560,38 @@ class TestWMMAMatmul:
         B = torch.randn(K, N, device="cuda", dtype=torch.float16)
         out = cuda_kernels.wmma_matmul(A, B)
         assert out.dtype == torch.float32
+
+
+@pytest.mark.skipif(
+    cuda_kernels is None, reason="CUDA extension not built — run `make build-cuda`"
+)
+class TestCUDAVectorAdd:
+    def setup_method(self):
+        torch.manual_seed(42)
+        self.x = torch.randn(1 << 20, device="cuda", dtype=torch.float32)
+        self.y = torch.randn(1 << 20, device="cuda", dtype=torch.float32)
+
+    def test_shape(self):
+        out = cuda_kernels.vector_add(self.x, self.y)
+        assert out.shape == self.x.shape
+
+    def test_matches_pytorch(self):
+        ref = vector_add_pytorch(self.x, self.y)
+        out = cuda_kernels.vector_add(self.x, self.y)
+        torch.testing.assert_close(out, ref)
+
+    def test_matches_triton(self):
+        ref = vector_add(self.x, self.y)
+        out = cuda_kernels.vector_add(self.x, self.y)
+        torch.testing.assert_close(out, ref)
+
+    def test_unaligned_size(self):
+        """Sizes not divisible by the block size exercise the bounds check."""
+        x = torch.randn(1000003, device="cuda", dtype=torch.float32)
+        y = torch.randn(1000003, device="cuda", dtype=torch.float32)
+        ref = vector_add_pytorch(x, y)
+        out = cuda_kernels.vector_add(x, y)
+        torch.testing.assert_close(out, ref)
 
 
 @pytest.mark.skipif(

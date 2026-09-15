@@ -8,6 +8,7 @@ setup(
             "cuda_kernels",
             [
                 "bindings.cu",
+                "vector_add.cu",
                 "softmax.cu",
                 "softmax_triton.cu",
                 "fused_rmsnorm_swiglu.cu",

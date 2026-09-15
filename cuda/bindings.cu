@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 
 // Forward declarations — implemented in their own .cu files
+torch::Tensor vector_add_cuda(torch::Tensor X, torch::Tensor Y);
 torch::Tensor softmax_cuda(torch::Tensor input);
 torch::Tensor softmax_triton_cuda(torch::Tensor input);
 torch::Tensor fused_rmsnorm_swiglu_cuda(torch::Tensor input,
@@ -9,6 +10,7 @@ torch::Tensor fused_rmsnorm_swiglu_cuda(torch::Tensor input,
 torch::Tensor wmma_matmul_cuda(torch::Tensor A, torch::Tensor B);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("vector_add", &vector_add_cuda, "Vector Add (CUDA)");
   m.def("softmax", &softmax_cuda, "Naive Softmax (CUDA)");
   m.def("softmax_triton", &softmax_triton_cuda, "Softmax Triton-style (CUDA) ");
   m.def("fused_rmsnorm_swiglu", &fused_rmsnorm_swiglu_cuda,

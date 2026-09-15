@@ -1,4 +1,4 @@
-.PHONY: setup-cuda build-cuda test test-triton test-cuda clean-cuda
+.PHONY: setup-cuda build-cuda test test-triton test-cuda clean-cuda bench-vector-add bench-cuda-vector-add prof-vector-add prof-nsys-vector-add
 
 # Install CUDA dev headers (only need to run once)
 setup-cuda:
@@ -31,6 +31,34 @@ bench-softmax:
 # Benchmark softmax with CUDA (requires make build-cuda)
 bench-cuda-softmax:
 	python benchmarks/bench_cuda_softmax.py
+
+# Benchmark vector_add (Triton only — no CUDA build needed)
+bench-vector-add:
+	python benchmarks/bench_vector_add.py
+
+# Benchmark vector_add with CUDA (requires make build-cuda)
+bench-cuda-vector-add:
+	python benchmarks/bench_cuda_vector_add.py
+
+# Profile vector_add CUDA kernel with Nsight Compute.
+# Override the workload via VA_ARGS, e.g. `make prof-vector-add VA_ARGS="--n 1048576"`.
+# Output is teed to profiles/prof_vector_add_<n>.txt for diffing across versions.
+VA_ARGS ?= --n 67108864
+VA_N := $(shell echo "$(VA_ARGS)" | grep -oE -- "--n [0-9]+" | awk '{print $$2}')
+
+prof-vector-add:
+	@mkdir -p profiles
+	ncu --set basic --target-processes all \
+		--kernel-name vector_add_kernel \
+		--launch-skip 5 --launch-count 1 \
+		python cuda/vector_add_profile_runner.py $(VA_ARGS) \
+		2>&1 | tee profiles/prof_vector_add_n$(VA_N).txt
+
+# Nsight Systems timeline for vector_add (works when ncu is blocked by host monitoring).
+prof-nsys-vector-add:
+	@mkdir -p profiles
+	nsys profile --stats=true -o profiles/nsys_vector_add_n$(VA_N) --force-overwrite=true \
+		python cuda/vector_add_profile_runner.py $(VA_ARGS)
 
 # Clean CUDA build artifacts
 clean-cuda:
