@@ -1,13 +1,24 @@
+"""
+Vector Add — PyTorch reference + Triton kernel
+
+out = X + Y, elementwise. The simplest possible kernel: one load per input,
+one store, no reduction. Good baseline for comparing launch/memory overhead
+against the fancier kernels in this repo.
+"""
 
 import torch
 import triton
 import triton.language as tl
 
-@triton.jit
+
+def vector_add_pytorch(X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
+    return X + Y
+
+
 @triton.jit
 def vector_add_kernel(
-    A, 
-    B, 
+    X, 
+    Y, 
     Out,
     n_elements,
     BLOCK_SIZE: tl.constexpr
@@ -18,21 +29,21 @@ def vector_add_kernel(
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
 
-    a = tl.load(A + offsets, mask=mask)
-    b = tl.load(B + offsets, mask=mask)
+    x = tl.load(X + offsets, mask=mask)
+    y = tl.load(Y + offsets, mask=mask)
 
-    out = a + b
+    out = x + y
 
     tl.store(Out + offsets, out, mask=mask)
 
 
-def vector_add(A: torch.Tensor, B: torch.Tensor):
-    out = torch.empty_like(A)
+def vector_add(X: torch.Tensor, Y: torch.Tensor):
+    out = torch.empty_like(X)
 
     BLOCK_SIZE = 1024
 
-    n_elements = A.numel()
+    n_elements = X.numel()
     grid = (triton.cdiv(n_elements, BLOCK_SIZE), )
-    vector_add_kernel[grid](A, B, out, n_elements, BLOCK_SIZE)
+    vector_add_kernel[grid](X, Y, out, n_elements, BLOCK_SIZE)
 
     return out
