@@ -13,12 +13,9 @@
 #include <math.h>
 #include <torch/extension.h>
 
-__global__ void vector_add_kernel(
-  const float *__restrict__ X,
-  const float *__restrict__ Y,
-  float *__restrict__ output,
-  int n_elements
-) {
+__global__ void vector_add_kernel(const float *__restrict__ X,
+                                  const float *__restrict__ Y,
+                                  float *__restrict__ output, int n_elements) {
   int block = blockIdx.x;
   int tid = threadIdx.x;
 
@@ -45,15 +42,12 @@ torch::Tensor vector_add_cuda(torch::Tensor X, torch::Tensor Y) {
   int threads = 256;
   int grid = (n_elements + threads - 1) / threads;
 
-  vector_add_kernel<<<grid, threads>>>(
-    X.data_ptr<float>(),
-    Y.data_ptr<float>(),
-    output.data_ptr<float>(),
-    n_elements
-  );
+  vector_add_kernel<<<grid, threads>>>(X.data_ptr<float>(), Y.data_ptr<float>(),
+                                       output.data_ptr<float>(), n_elements);
 
   cudaError_t err = cudaGetLastError();
-  TORCH_CHECK(err == cudaSuccess, "CUDA kernel launch failed: ", cudaGetErrorString(err));
+  TORCH_CHECK(err == cudaSuccess,
+              "CUDA kernel launch failed: ", cudaGetErrorString(err));
 
   return output;
 }
