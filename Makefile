@@ -6,11 +6,17 @@ setup-cuda:
 	@echo "Done. Make sure CUDA_HOME is set:"
 	@echo "  export CUDA_HOME=$$CONDA_PREFIX"
 
-# Build CUDA extension
+# Build CUDA extension.
+# Defaults to A100 (8.0) — override for other GPUs, e.g.:
+#   make build-cuda ARCH_LIST=12.0        # Blackwell (RTX 50-series / RTX PRO Blackwell)
+#   make build-cuda ARCH_LIST=8.9         # Ada (RTX 40-series / L4)
+#   make build-cuda ARCH_LIST=9.0         # Hopper (H100)
+# Compute capability for your card: python -c "import torch; print(torch.cuda.get_device_capability())"
+ARCH_LIST ?= 8.0
 build-cuda:
-	cd cuda && TORCH_CUDA_ARCH_LIST="8.0" python setup.py build_ext --inplace
+	cd cuda && TORCH_CUDA_ARCH_LIST="$(ARCH_LIST)" python setup.py build_ext --inplace
 	cp cuda/cuda_kernels*.so . 2>/dev/null || cp cuda/build/lib*/cuda_kernels*.so . 2>/dev/null
-	@echo "Built cuda_kernels extension"
+	@echo "Built cuda_kernels extension (arch $(ARCH_LIST))"
 
 # Run all tests
 test:
