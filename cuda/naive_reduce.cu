@@ -31,7 +31,7 @@ __global__ void naive_reduce_kernel(const float *__restrict__ X,
     float val = shared[tid];
 #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1) {
-      val += __shfl_down_sync(0xffffffff, shared[tid], offset);
+      val += __shfl_down_sync(0xffffffff, val, offset);
     }
     if (tid == 0) {
       atomicAdd(output, val);
@@ -53,7 +53,7 @@ torch::Tensor naive_reduce_cuda(torch::Tensor X) {
   int smem_size = threads * sizeof(float);
 
   naive_reduce_kernel<<<grid, threads, smem_size>>>(
-      input.data_ptr<float>(), output.data_ptr<float>(), n_elements);
+      X.data_ptr<float>(), output.data_ptr<float>(), n_elements);
 
   return output; // a 1-element tensor holding the scalar result
 }
