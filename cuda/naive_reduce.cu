@@ -23,9 +23,11 @@ __global__ void naive_reduce_kernel(const float *__restrict__ X,
     __syncthreads();
   }
 
+  if (tid < 32) {
 #pragma unroll
-  for (int offset = 16; offset > 0; offset >>= 1) {
-    shared[tid] += __shfl_down_sync(0xffffffff, shared[tid], offset);
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      shared[tid] += __shfl_down_sync(0xffffffff, shared[tid], offset);
+    }
   }
 
   if (tid == 0) {
