@@ -16,11 +16,16 @@ __global__ void naive_reduce_kernel(const float *__restrict__ X,
 
   __syncthreads();
 
-  for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
+  for (int stride = blockDim.x / 2; stride >= 32; stride /= 2) {
     if (tid < stride) {
       shared[tid] = shared[tid] + shared[tid + stride];
     }
     __syncthreads();
+  }
+
+#pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    shared[tid] += __shfl_down_sync(0xffffffff, shared[tid], offset);
   }
 
   if (tid == 0) {
