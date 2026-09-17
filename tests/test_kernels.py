@@ -597,6 +597,61 @@ class TestCUDAVectorAdd:
 @pytest.mark.skipif(
     cuda_kernels is None, reason="CUDA extension not built — run `make build-cuda`"
 )
+class TestCUDANaiveReduce:
+    """Multi-pass tree-reduction full-tensor sum — reduces to a 1-element tensor."""
+
+    def setup_method(self):
+        torch.manual_seed(42)
+        self.x = torch.randn(1 << 16, device="cuda", dtype=torch.float32)
+
+    def test_output_shape(self):
+        out = cuda_kernels.naive_reduce(self.x)
+        assert out.numel() == 1
+
+    def test_matches_pytorch_sum(self):
+        ref = self.x.sum()
+        out = cuda_kernels.naive_reduce(self.x)
+        torch.testing.assert_close(out.reshape(()), ref, atol=1e-1, rtol=1e-3)
+
+    def test_single_element(self):
+        """n_elements == 1: the host loop never launches a kernel."""
+        x = torch.tensor([3.14], device="cuda", dtype=torch.float32)
+        out = cuda_kernels.naive_reduce(x)
+        torch.testing.assert_close(out.reshape(()), x[0])
+
+    def test_exact_block_size(self):
+        """n_elements == threads: single pass, no partial block."""
+        x = torch.randn(256, device="cuda", dtype=torch.float32)
+        ref = x.sum()
+        out = cuda_kernels.naive_reduce(x)
+        torch.testing.assert_close(out.reshape(()), ref, atol=1e-2, rtol=1e-3)
+
+    def test_unaligned_size(self):
+        """Sizes not divisible by the block size exercise the zero-padding mask
+        and force an extra reduction pass over the odd-sized partial-sum array."""
+        x = torch.randn(1000003, device="cuda", dtype=torch.float32)
+        ref = x.sum()
+        out = cuda_kernels.naive_reduce(x)
+        torch.testing.assert_close(out.reshape(()), ref, atol=1.0, rtol=1e-3)
+
+    def test_multi_dim_input_flattened(self):
+        """No dim argument — reduces every element like torch.sum(x) with no dim."""
+        x = torch.randn(32, 2048, device="cuda", dtype=torch.float32)
+        ref = x.sum()
+        out = cuda_kernels.naive_reduce(x)
+        torch.testing.assert_close(out.reshape(()), ref, atol=1.0, rtol=1e-3)
+
+    def test_large_input_multi_pass(self):
+        """Large enough to require several kernel launches (multi-level tree)."""
+        x = torch.randn(1 << 22, device="cuda", dtype=torch.float32)
+        ref = x.sum()
+        out = cuda_kernels.naive_reduce(x)
+        torch.testing.assert_close(out.reshape(()), ref, atol=2.0, rtol=1e-3)
+
+
+@pytest.mark.skipif(
+    cuda_kernels is None, reason="CUDA extension not built — run `make build-cuda`"
+)
 class TestCUDASoftmax:
     def setup_method(self):
         torch.manual_seed(42)

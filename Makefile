@@ -1,4 +1,4 @@
-.PHONY: setup-cuda build-cuda test test-triton test-cuda clean-cuda bench-vector-add bench-cuda-vector-add prof-vector-add prof-nsys-vector-add
+.PHONY: setup-cuda build-cuda test test-triton test-cuda clean-cuda bench-vector-add bench-cuda-vector-add prof-vector-add prof-nsys-vector-add bench-cuda-naive-reduce prof-naive-reduce prof-nsys-naive-reduce
 
 # Install CUDA dev headers (only need to run once)
 setup-cuda:
@@ -65,6 +65,30 @@ prof-nsys-vector-add:
 	@mkdir -p profiles
 	nsys profile --stats=true -o profiles/nsys_vector_add_n$(VA_N) --force-overwrite=true \
 		python cuda/vector_add_profile_runner.py $(VA_ARGS)
+
+# Benchmark naive_reduce (requires make build-cuda)
+bench-cuda-naive-reduce:
+	python benchmarks/bench_cuda_naive_reduce.py
+
+# Profile naive_reduce CUDA kernel with Nsight Compute.
+# Override the workload via NR_ARGS, e.g. `make prof-naive-reduce NR_ARGS="--n 1048576"`.
+# Output is teed to profiles/prof_naive_reduce_<n>.txt for diffing across versions.
+NR_ARGS ?= --n 16777216
+NR_N := $(shell echo "$(NR_ARGS)" | grep -oE -- "--n [0-9]+" | awk '{print $$2}')
+
+prof-naive-reduce:
+	@mkdir -p profiles
+	ncu --set basic --target-processes all \
+		--kernel-name naive_reduce_kernel \
+		--launch-skip 5 --launch-count 1 \
+		python cuda/naive_reduce_profile_runner.py $(NR_ARGS) \
+		2>&1 | tee profiles/prof_naive_reduce_n$(NR_N).txt
+
+# Nsight Systems timeline for naive_reduce (works when ncu is blocked by host monitoring).
+prof-nsys-naive-reduce:
+	@mkdir -p profiles
+	nsys profile --stats=true -o profiles/nsys_naive_reduce_n$(NR_N) --force-overwrite=true \
+		python cuda/naive_reduce_profile_runner.py $(NR_ARGS)
 
 # Clean CUDA build artifacts
 clean-cuda:

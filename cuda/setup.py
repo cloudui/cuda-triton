@@ -9,6 +9,7 @@ setup(
             [
                 "bindings.cu",
                 "vector_add.cu",
+                "naive_reduce.cu",
                 "softmax.cu",
                 "softmax_triton.cu",
                 "fused_rmsnorm_swiglu.cu",
