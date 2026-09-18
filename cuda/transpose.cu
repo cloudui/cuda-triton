@@ -10,7 +10,7 @@
 #include <math.h>
 #include <torch/extension.h>
 
-#define TILE 32
+#define TILE 16
 
 __global__ void transpose_kernel(const float *__restrict__ X,
                                  float *__restrict__ output, int M, int N) {
