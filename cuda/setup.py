@@ -14,6 +14,7 @@ setup(
                 "softmax_triton.cu",
                 "fused_rmsnorm_swiglu.cu",
                 "wmma_matmul.cu",
+                "transpose.cu",
             ],
             # extra_compile_args={"nvcc": ["-ccbin", "/usr/bin/gcc"]},
         ),

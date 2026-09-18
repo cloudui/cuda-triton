@@ -819,6 +819,59 @@ class TestCUDAFlashAttention:
         assert lse.shape == (2, 4, 256)
 
 
+@pytest.mark.skipif(
+    cuda_kernels is None, reason="CUDA extension not built — run `make build-cuda`"
+)
+class TestCUDATranspose:
+    """Naive MxN transpose (no shared-memory tiling)."""
+
+    SIZES = [(16, 16), (32, 64), (64, 32), (128, 256), (1, 128), (128, 1)]
+
+    @pytest.mark.parametrize("M,N", SIZES)
+    def test_matches_pytorch(self, M, N):
+        torch.manual_seed(42)
+        x = torch.randn(M, N, device="cuda", dtype=torch.float32)
+        ref = x.t().contiguous()
+        out = cuda_kernels.transpose(x)
+        torch.testing.assert_close(out, ref)
+
+    @pytest.mark.parametrize("M,N", SIZES)
+    def test_output_shape(self, M, N):
+        torch.manual_seed(42)
+        x = torch.randn(M, N, device="cuda", dtype=torch.float32)
+        out = cuda_kernels.transpose(x)
+        assert out.shape == (N, M)
+
+    def test_square_matrix(self):
+        torch.manual_seed(42)
+        x = torch.randn(64, 64, device="cuda", dtype=torch.float32)
+        ref = x.t().contiguous()
+        out = cuda_kernels.transpose(x)
+        torch.testing.assert_close(out, ref)
+
+    def test_unaligned_size(self):
+        """Dims not divisible by the 16x16 block size exercise the bounds check."""
+        x = torch.randn(37, 51, device="cuda", dtype=torch.float32)
+        ref = x.t().contiguous()
+        out = cuda_kernels.transpose(x)
+        torch.testing.assert_close(out, ref)
+
+    def test_double_transpose_is_identity(self):
+        torch.manual_seed(42)
+        x = torch.randn(48, 96, device="cuda", dtype=torch.float32)
+        out = cuda_kernels.transpose(cuda_kernels.transpose(x))
+        torch.testing.assert_close(out, x)
+
+    def test_non_contiguous_input(self):
+        """Kernel calls .contiguous() internally, so a transposed view as input
+        should still produce a correct result."""
+        torch.manual_seed(42)
+        x = torch.randn(64, 32, device="cuda", dtype=torch.float32).t()
+        ref = x.t().contiguous()
+        out = cuda_kernels.transpose(x)
+        torch.testing.assert_close(out, ref)
+
+
 @pytest.mark.skipif(flash_attn_cutlass is None, reason="flash_attn_cutlass not built")
 class TestCUTLASSFlashAttention:
     """CUTLASS/CuTe-based FlashAttention-2 forward pass.
