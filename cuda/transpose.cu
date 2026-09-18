@@ -33,7 +33,8 @@ torch::Tensor transpose_cuda(torch::Tensor X) {
   dim3 block(BX, BY);
   dim3 grid((N + BX - 1) / BX, (M + BY - 1) / BY);
 
-  transpose_kernel<<<grid, block>>>(X.data_ptr<float>(), output.data_ptr<float>(), M, N);
+  transpose_kernel<<<grid, block>>>(X.data_ptr<float>(),
+                                    output.data_ptr<float>(), M, N);
 
   return output;
 }
