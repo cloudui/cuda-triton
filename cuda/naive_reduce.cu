@@ -9,7 +9,7 @@ __global__ void naive_reduce_kernel(const float *__restrict__ X,
                                     int n_elements) {
   int tid = threadIdx.x;
   int warpid = tid / 32;
-  constexpr int nWarps = blockDim.x / 32;
+  int n_warps = blockDim.x / 32;
 
   extern __shared__ float shared[];
 
@@ -21,19 +21,18 @@ __global__ void naive_reduce_kernel(const float *__restrict__ X,
   }
 
   // pre tree reduce warp reduction
-  float preval = shared[tid];
 #pragma unroll
   for (int offset = 16; offset > 0; offset >>= 1) {
-    preval += __shfl_down_sync(0xffffffff, preval, offset);
+    sum += __shfl_down_sync(0xffffffff, sum, offset);
   }
   if (tid % 32 == 0) {
-    shared[warpid] = preval;
+    shared[warpid] = sum;
   }
 
   __syncthreads();
 
   if (warpid == 0) {
-    float val = (tid < blockDim.x / 32) ? shared[tid] : 0.0f;
+    float val = (tid < n_warps) ? shared[tid] : 0.0f;
 #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1) {
       val += __shfl_down_sync(0xffffffff, val, offset);
