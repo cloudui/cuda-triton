@@ -10,13 +10,28 @@
 #include <math.h>
 #include <torch/extension.h>
 
+#define TILE 32
+
 __global__ void transpose_kernel(const float *__restrict__ X,
                                  float *__restrict__ output, int M, int N) {
-  int row = blockIdx.y * blockDim.y + threadIdx.y;
-  int col = blockIdx.x * blockDim.x + threadIdx.x;
+  int row = blockIdx.y * TILE + threadIdx.y;
+  int col = blockIdx.x * TILE + threadIdx.x;
+
+  extern __shared__ float stage[TILE][TILE];
 
   if (row < M && col < N) {
-    output[col * M + row] = X[row * N + col];
+    stage[threadIdx.y][threadIdx.x] = X[row * N + col];
+  }
+
+  __syncthreads();
+
+  // update row & col to tile's transpose perspectivew
+  // for coalescing indexing
+  row = blockIdx.y * TILE + threadIdx.x;
+  col = blockIdx.x * TILE + threadIdx.y;
+
+  if (row < N && col < M) {
+    output[col * M + row] = stage[threadIdx.x][threadIdx.y];
   }
 }
 
@@ -29,7 +44,7 @@ torch::Tensor transpose_cuda(torch::Tensor X) {
   int M = X.size(0), N = X.size(1);
   auto output = torch::empty({N, M}, X.options());
 
-  const int BX = 16, BY = 16;
+  const int BX = TILE, BY = TILE;
   dim3 block(BX, BY);
   dim3 grid((N + BX - 1) / BX, (M + BY - 1) / BY);
 
