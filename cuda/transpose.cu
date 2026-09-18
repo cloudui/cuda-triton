@@ -17,7 +17,7 @@ __global__ void transpose_kernel(const float *__restrict__ X,
   int row = blockIdx.y * TILE + threadIdx.y;
   int col = blockIdx.x * TILE + threadIdx.x;
 
-  extern __shared__ float stage[TILE][TILE];
+  __shared__ float stage[TILE][TILE];
 
   if (row < M && col < N) {
     stage[threadIdx.y][threadIdx.x] = X[row * N + col];
@@ -27,11 +27,11 @@ __global__ void transpose_kernel(const float *__restrict__ X,
 
   // update row & col to tile's transpose perspectivew
   // for coalescing indexing
-  row = blockIdx.y * TILE + threadIdx.x;
-  col = blockIdx.x * TILE + threadIdx.y;
+  int out_row = blockIdx.x * TILE + threadIdx.y;
+  int out_col = blockIdx.y * TILE + threadIdx.x;
 
-  if (row < N && col < M) {
-    output[col * M + row] = stage[threadIdx.x][threadIdx.y];
+  if (out_row < N && out_col < M) {
+    output[out_row * M + out_col] = stage[threadIdx.x][threadIdx.y];
   }
 }
 
