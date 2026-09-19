@@ -17,7 +17,7 @@ __global__ void transpose_kernel(const float *__restrict__ X,
   int row = blockIdx.y * TILE + threadIdx.y;
   int col = blockIdx.x * TILE + threadIdx.x;
 
-  __shared__ float stage[TILE][TILE];
+  __shared__ float stage[TILE][TILE + 1];
 
   if (row < M && col < N) {
     stage[threadIdx.y][threadIdx.x] = X[row * N + col];
