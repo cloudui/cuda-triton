@@ -35,3 +35,17 @@ MxN              PyTorch (ms)    CUDA (ms)      CUDA vs PyT
 4096x4096        0.3336          0.1924         1.73x
 1024x4096        0.0881          0.0560         1.57x
 ```
+
+## Coalesced and Padded for bank conflict
+```
+python benchmarks/bench_cuda_transpose.py 
+MxN              PyTorch (ms)    CUDA (ms)      CUDA vs PyT
+------------------------------------------------------------
+128x128          0.0043          0.0043         1.00x
+512x512          0.0127          0.0067         1.88x
+1024x1024        0.0294          0.0192         1.53x
+2048x2048        0.0820          0.0565         1.45x
+4096x4096        0.3329          0.1922         1.73x
+1024x4096        0.0882          0.0558         1.58x
+16384x16384      5.2502          3.1881         1.65x
+```
