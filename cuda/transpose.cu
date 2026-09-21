@@ -1,37 +1,32 @@
-// FP32
-//
-// Matrix transpose CUDA kernel — naive implementation (no shared-memory
-// tiling, so reads or writes end up uncoalesced depending on direction).
-//
-// Build with: python cuda/setup.py install
-// Or use torch.utils.cpp_extension.load() for JIT compilation
-
 #include <cuda_runtime.h>
-#include <math.h>
 #include <torch/extension.h>
 
-#define TILE 16
+#define TILE 32
+#define BLOCK_ROWS 8
 
 __global__ void transpose_kernel(const float *__restrict__ X,
                                  float *__restrict__ output, int M, int N) {
-  int row = blockIdx.y * TILE + threadIdx.y;
-  int col = blockIdx.x * TILE + threadIdx.x;
-
   __shared__ float stage[TILE][TILE + 1];
 
-  if (row < M && col < N) {
-    stage[threadIdx.y][threadIdx.x] = X[row * N + col];
+  int col = blockIdx.x * TILE + threadIdx.x;
+  int row = blockIdx.y * TILE + threadIdx.y;
+
+  // Load: each thread handles TILE/BLOCK_ROWS = 4 rows of the tile.
+  for (int j = 0; j < TILE; j += BLOCK_ROWS) {
+    if (row + j < M && col < N) {
+      stage[threadIdx.y + j][threadIdx.x] = X[(row + j) * N + col];
+    }
   }
 
   __syncthreads();
 
-  // update row & col to tile's transpose perspectivew
-  // for coalescing indexing
-  int out_row = blockIdx.x * TILE + threadIdx.y;
   int out_col = blockIdx.y * TILE + threadIdx.x;
+  int out_row = blockIdx.x * TILE + threadIdx.y;
 
-  if (out_row < N && out_col < M) {
-    output[out_row * M + out_col] = stage[threadIdx.x][threadIdx.y];
+  for (int j = 0; j < TILE; j += BLOCK_ROWS) {
+    if (out_row + j < N && out_col < M) {
+      output[(out_row + j) * M + out_col] = stage[threadIdx.x][threadIdx.y + j];
+    }
   }
 }
 
@@ -44,9 +39,8 @@ torch::Tensor transpose_cuda(torch::Tensor X) {
   int M = X.size(0), N = X.size(1);
   auto output = torch::empty({N, M}, X.options());
 
-  const int BX = TILE, BY = TILE;
-  dim3 block(BX, BY);
-  dim3 grid((N + BX - 1) / BX, (M + BY - 1) / BY);
+  dim3 block(TILE, BLOCK_ROWS);
+  dim3 grid((N + TILE - 1) / TILE, (M + TILE - 1) / TILE);
 
   transpose_kernel<<<grid, block>>>(X.data_ptr<float>(),
                                     output.data_ptr<float>(), M, N);
