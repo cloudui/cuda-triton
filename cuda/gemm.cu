@@ -11,10 +11,20 @@ __global__ void gemm_kernel(const float *__restrict__ A,
   int row = blockIdx.y * blockDim.y + tidy;
   int col = blockIdx.x * blockDim.x + tidx;
 
-  float sum = 0.0f;
+  __shared__ float As[TILE][TILE];
+  __shared__ float Bs[TILE][TILE];
+
   if (row < M && col < N) {
-    for (int i = 0; i < K; i++) {
-      sum += A[row * K + i] * B[(i * N) + col];
+    float sum = 0.0f;
+    for (int tile = 0, idx = 0; tile < K; tile += TILE, idx++) {
+      As[row][idx] = A[row * K + tile + tidx];
+      Bs[idx][col] = B[(tile + idx) * N + col];
+      __syncthreads();
+
+      for (int i = 0; i < TILE; i++) {
+        sum += As[row][i] * Bs[i][col];
+      }
+      __syncthreads();
     }
 
     output[row * N + col] = sum;
