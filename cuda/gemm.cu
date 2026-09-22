@@ -14,7 +14,7 @@ __global__ void gemm_kernel(const float *__restrict__ A,
   float sum = 0.0f;
   if (row < M && col < N) {
     for (int i = 0; i < K; i++) {
-      sum += A[row * K + i] * B[col * N + i];
+      sum += A[row * K + i] * B[(i * N) + col];
     }
   }
 
