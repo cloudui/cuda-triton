@@ -35,13 +35,6 @@ def benchmark():
 
         print(f"{f'{M}x{N}':<16} {ms_pytorch:<15.4f} {ms_cuda:<14.4f} {speedup:.2f}x")
 
-    print()
-    print(
-        "Expect CUDA to lag PyTorch here: the naive kernel reads/writes global\n"
-        "memory directly with no shared-memory tiling, so one side of the\n"
-        "access pattern is always uncoalesced, vs. PyTorch's tiled transpose."
-    )
-
 
 if __name__ == "__main__":
     benchmark()

@@ -35,13 +35,6 @@ def benchmark():
 
         print(f"{n:<12} {ms_pytorch:<15.4f} {ms_cuda:<14.4f} {speedup:.2f}x")
 
-    print()
-    print(
-        "Expect CUDA to lag PyTorch here: naive_reduce does one kernel launch per\n"
-        "tree level (log_256(N) launches) with no grid-stride loop or warp shuffle,\n"
-        "vs. PyTorch's single-pass, vectorized, warp-shuffle reduction."
-    )
-
 
 if __name__ == "__main__":
     benchmark()
