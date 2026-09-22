@@ -921,15 +921,28 @@ class TestCUDAGemm:
         out = cuda_kernels.gemm(A, B)
         assert out.dtype == torch.float32
 
-    def test_rectangular_m(self):
+    # (M, K) pairs — A is MxK, B stays square KxK (M != K, so A/output are
+    # rectangular). B can't be genuinely rectangular (K != N) here: see the
+    # class docstring, that indexing is only in-bounds when K == N.
+    RECT_SIZES = [(128, 64), (64, 128), (16, 256), (256, 16), (32, 48)]
+
+    @pytest.mark.parametrize("M,K", RECT_SIZES)
+    def test_rectangular_m(self, M, K):
         """M can differ from K/N freely — only B's indexing needs K == N."""
         torch.manual_seed(42)
-        M, K = 128, 64
         A = torch.randn(M, K, device="cuda", dtype=torch.float32)
         B = torch.randn(K, K, device="cuda", dtype=torch.float32)
         ref = A @ B.T
         out = cuda_kernels.gemm(A, B)
         torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-3)
+
+    @pytest.mark.parametrize("M,K", RECT_SIZES)
+    def test_rectangular_output_shape(self, M, K):
+        torch.manual_seed(42)
+        A = torch.randn(M, K, device="cuda", dtype=torch.float32)
+        B = torch.randn(K, K, device="cuda", dtype=torch.float32)
+        out = cuda_kernels.gemm(A, B)
+        assert out.shape == (M, K)
 
     def test_identity_matrix(self):
         torch.manual_seed(42)
