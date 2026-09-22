@@ -877,31 +877,22 @@ class TestCUDATranspose:
 )
 class TestCUDAGemm:
     """Naive GEMM kernel (cuda/gemm.cu) — no shared-memory tiling.
+    A: MxK, B: KxN, output: MxN — standard row-major GEMM (A @ B).
 
-    NOTE: the kernel indexes B with row-stride N (B.size(1)) rather than K
-    (A.size(1)/the reduction dim), i.e. it computes `B[col * N + i]`. That
-    only lines up with a valid, in-bounds memory access when K == N, and in
-    that case the math it actually performs is `A @ B.T`, not `A @ B`
-    (since it reads row `col` of B rather than column `col`). The kernel
-    also writes `output[row * N + col]` outside the `row < M && col < N`
-    guard, so non-tile-aligned (M, N) can write out of bounds.
-
-    To test this as-is without tripping either issue, every case below uses
-    square (M, K, N) with K == N and dimensions that are multiples of the
-    16x16 thread block, and compares against `A @ B.T`. This is a
-    description of current behavior, not a claim about intended behavior —
-    flagging in case the stride/transpose was a mistake rather than a
-    deliberate "B pre-transposed" convention.
+    NOTE: the kernel still writes `output[row * N + col]` outside the
+    `row < M && col < N` guard, so non-tile-aligned (M, N) can write out of
+    bounds. Every case below keeps M and N as multiples of the 16x16
+    thread block to avoid that; K is unconstrained.
     """
 
     SIZES = [16, 32, 64, 128, 256]
 
     @pytest.mark.parametrize("size", SIZES)
-    def test_matches_pytorch_a_matmul_bT(self, size):
+    def test_matches_pytorch(self, size):
         torch.manual_seed(42)
         A = torch.randn(size, size, device="cuda", dtype=torch.float32)
         B = torch.randn(size, size, device="cuda", dtype=torch.float32)
-        ref = A @ B.T
+        ref = A @ B
         out = cuda_kernels.gemm(A, B)
         torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-3)
 
@@ -921,28 +912,34 @@ class TestCUDAGemm:
         out = cuda_kernels.gemm(A, B)
         assert out.dtype == torch.float32
 
-    # (M, K) pairs — A is MxK, B stays square KxK (M != K, so A/output are
-    # rectangular). B can't be genuinely rectangular (K != N) here: see the
-    # class docstring, that indexing is only in-bounds when K == N.
-    RECT_SIZES = [(128, 64), (64, 128), (16, 256), (256, 16), (32, 48)]
+    # (M, K, N) triples — genuinely rectangular now that B is KxN.
+    # M/N kept as multiples of 16 (see class docstring); K is unconstrained,
+    # including a non-multiple-of-16 value to exercise the tail of the
+    # reduction loop.
+    RECT_SIZES = [
+        (128, 64, 32),
+        (64, 128, 256),
+        (16, 256, 64),
+        (256, 16, 128),
+        (32, 37, 16),
+    ]
 
-    @pytest.mark.parametrize("M,K", RECT_SIZES)
-    def test_rectangular_m(self, M, K):
-        """M can differ from K/N freely — only B's indexing needs K == N."""
+    @pytest.mark.parametrize("M,K,N", RECT_SIZES)
+    def test_rectangular_matches_pytorch(self, M, K, N):
         torch.manual_seed(42)
         A = torch.randn(M, K, device="cuda", dtype=torch.float32)
-        B = torch.randn(K, K, device="cuda", dtype=torch.float32)
-        ref = A @ B.T
+        B = torch.randn(K, N, device="cuda", dtype=torch.float32)
+        ref = A @ B
         out = cuda_kernels.gemm(A, B)
         torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-3)
 
-    @pytest.mark.parametrize("M,K", RECT_SIZES)
-    def test_rectangular_output_shape(self, M, K):
+    @pytest.mark.parametrize("M,K,N", RECT_SIZES)
+    def test_rectangular_output_shape(self, M, K, N):
         torch.manual_seed(42)
         A = torch.randn(M, K, device="cuda", dtype=torch.float32)
-        B = torch.randn(K, K, device="cuda", dtype=torch.float32)
+        B = torch.randn(K, N, device="cuda", dtype=torch.float32)
         out = cuda_kernels.gemm(A, B)
-        assert out.shape == (M, K)
+        assert out.shape == (M, N)
 
     def test_identity_matrix(self):
         torch.manual_seed(42)
