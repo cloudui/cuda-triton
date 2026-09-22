@@ -872,6 +872,73 @@ class TestCUDATranspose:
         torch.testing.assert_close(out, ref)
 
 
+@pytest.mark.skipif(
+    cuda_kernels is None, reason="CUDA extension not built — run `make build-cuda`"
+)
+class TestCUDAGemm:
+    """Naive GEMM kernel (cuda/gemm.cu) — no shared-memory tiling.
+
+    NOTE: the kernel indexes B with row-stride N (B.size(1)) rather than K
+    (A.size(1)/the reduction dim), i.e. it computes `B[col * N + i]`. That
+    only lines up with a valid, in-bounds memory access when K == N, and in
+    that case the math it actually performs is `A @ B.T`, not `A @ B`
+    (since it reads row `col` of B rather than column `col`). The kernel
+    also writes `output[row * N + col]` outside the `row < M && col < N`
+    guard, so non-tile-aligned (M, N) can write out of bounds.
+
+    To test this as-is without tripping either issue, every case below uses
+    square (M, K, N) with K == N and dimensions that are multiples of the
+    16x16 thread block, and compares against `A @ B.T`. This is a
+    description of current behavior, not a claim about intended behavior —
+    flagging in case the stride/transpose was a mistake rather than a
+    deliberate "B pre-transposed" convention.
+    """
+
+    SIZES = [16, 32, 64, 128, 256]
+
+    @pytest.mark.parametrize("size", SIZES)
+    def test_matches_pytorch_a_matmul_bT(self, size):
+        torch.manual_seed(42)
+        A = torch.randn(size, size, device="cuda", dtype=torch.float32)
+        B = torch.randn(size, size, device="cuda", dtype=torch.float32)
+        ref = A @ B.T
+        out = cuda_kernels.gemm(A, B)
+        torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-3)
+
+    @pytest.mark.parametrize("size", SIZES)
+    def test_output_shape(self, size):
+        torch.manual_seed(42)
+        A = torch.randn(size, size, device="cuda", dtype=torch.float32)
+        B = torch.randn(size, size, device="cuda", dtype=torch.float32)
+        out = cuda_kernels.gemm(A, B)
+        assert out.shape == (size, size)
+
+    @pytest.mark.parametrize("size", SIZES)
+    def test_output_dtype(self, size):
+        torch.manual_seed(42)
+        A = torch.randn(size, size, device="cuda", dtype=torch.float32)
+        B = torch.randn(size, size, device="cuda", dtype=torch.float32)
+        out = cuda_kernels.gemm(A, B)
+        assert out.dtype == torch.float32
+
+    def test_rectangular_m(self):
+        """M can differ from K/N freely — only B's indexing needs K == N."""
+        torch.manual_seed(42)
+        M, K = 128, 64
+        A = torch.randn(M, K, device="cuda", dtype=torch.float32)
+        B = torch.randn(K, K, device="cuda", dtype=torch.float32)
+        ref = A @ B.T
+        out = cuda_kernels.gemm(A, B)
+        torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-3)
+
+    def test_identity_matrix(self):
+        torch.manual_seed(42)
+        A = torch.randn(64, 64, device="cuda", dtype=torch.float32)
+        I = torch.eye(64, device="cuda", dtype=torch.float32)
+        out = cuda_kernels.gemm(A, I)
+        torch.testing.assert_close(out, A, atol=1e-3, rtol=1e-3)
+
+
 @pytest.mark.skipif(flash_attn_cutlass is None, reason="flash_attn_cutlass not built")
 class TestCUTLASSFlashAttention:
     """CUTLASS/CuTe-based FlashAttention-2 forward pass.

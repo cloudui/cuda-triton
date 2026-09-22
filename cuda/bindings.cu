@@ -10,6 +10,7 @@ torch::Tensor fused_rmsnorm_swiglu_cuda(torch::Tensor input,
                                         torch::Tensor gate);
 torch::Tensor wmma_matmul_cuda(torch::Tensor A, torch::Tensor B);
 torch::Tensor transpose_cuda(torch::Tensor X);
+torch::Tensor gemm_cuda(torch::Tensor A, torch::Tensor B);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("vector_add", &vector_add_cuda, "Vector Add (CUDA)");
@@ -20,4 +21,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused RMSNorm + SwiGLU (CUDA)");
   m.def("wmma_matmul", &wmma_matmul_cuda, "WMMA Tiled Matmul (1 warp)");
   m.def("transpose", &transpose_cuda, "MxN matrix transpose");
+  m.def("gemm", &gemm_cuda, "Naive tiled-launch GEMM");
 }
