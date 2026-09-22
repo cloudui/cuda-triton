@@ -16,9 +16,9 @@ __global__ void gemm_kernel(const float *__restrict__ A,
     for (int i = 0; i < K; i++) {
       sum += A[row * K + i] * B[(i * N) + col];
     }
-  }
 
-  output[row * N + col] = sum;
+    output[row * N + col] = sum;
+  }
 }
 
 torch::Tensor gemm_cuda(torch::Tensor A, torch::Tensor B) {
