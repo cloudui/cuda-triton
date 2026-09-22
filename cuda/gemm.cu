@@ -16,14 +16,15 @@ __global__ void gemm_kernel(const float *__restrict__ A,
 
   float sum = 0.0f;
   for (int tile = 0, idx = 0; tile < K; tile += TILE, idx++) {
-    float Asi = (tile + tidy < M) ? A[row * K + tile + tidx] : 0.0f;
-    float Bsi = (tile + tidx < N) ? B[(tile + tidy) * N + col] : 0.0f;
+    float Asi = (row < M && tile + tidx < K) ? A[row * K + tile + tidx] : 0.0f;
+    float Bsi =
+        (col < N && tile + tidy < K) ? B[(tile + tidy) * N + col] : 0.0f;
     As[tidy][tidx] = Asi;
     Bs[tidy][tidx] = Bsi;
     __syncthreads();
 
     for (int i = 0; i < TILE; i++) {
-      sum += As[row][i] * Bs[i][col];
+      sum += As[tidy][i] * Bs[i][tidx];
     }
     __syncthreads();
   }
